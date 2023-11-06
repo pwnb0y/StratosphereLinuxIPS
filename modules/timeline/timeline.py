@@ -1,9 +1,5 @@
 # Must imports
-from slips_files.common.abstracts import Module
-import multiprocessing
-from slips_files.core.database.database import __database__
-from slips_files.common.config_parser import ConfigParser
-from slips_files.common.slips_utils import utils
+from slips_files.common.imports import *
 import traceback
 import sys
 
@@ -12,44 +8,24 @@ import time
 import json
 
 
-class Module(Module, multiprocessing.Process):
+class Timeline(Module, multiprocessing.Process):
     # Name: short name of the module. Do not use spaces
     name = 'Timeline'
     description = 'Creates kalipso timeline of what happened in the network based on flows and available data'
     authors = ['Sebastian Garcia']
 
-    def __init__(self, outputqueue, redis_port):
-        multiprocessing.Process.__init__(self)
-        # All the printing output should be sent to the outputqueue. The outputqueue is connected to another process called OutputProcess
-        self.outputqueue = outputqueue
-        __database__.start(redis_port)
-        self.separator = __database__.getFieldSeparator()
+    def init(self):
+        self.separator = self.db.get_field_separator()
         # Subscribe to 'new_flow' channel
-        self.c1 = __database__.subscribe('new_flow')
+        self.c1 = self.db.subscribe('new_flow')
+        self.channels = {
+            'new_flow': self.c1,
+        }
         # Read information how we should print timestamp.
         conf = ConfigParser()
         self.is_human_timestamp = conf.timeline_human_timestamp()
         self.analysis_direction = conf.analysis_direction()
 
-    def print(self, text, verbose=1, debug=0):
-        """
-        Function to use to print text using the outputqueue of slips.
-        Slips then decides how, when and where to print this text by taking all the processes into account
-        :param verbose:
-            0 - don't print
-            1 - basic operation/proof of work
-            2 - log I/O operations and filenames
-            3 - log database/profile/timewindow changes
-        :param debug:
-            0 - don't print
-            1 - print exceptions
-            2 - unsupported and unhandled types (cases that may cause errors)
-            3 - red warnings that needs examination - developer warnings
-        :param text: text to print. Can include format like 'Test {}'.format('here')
-        """
-
-        levels = f'{verbose}{debug}'
-        self.outputqueue.put(f'{levels}|{self.name}|{text}')
 
     def process_timestamp(self, timestamp: float) -> str:
         if self.is_human_timestamp:
@@ -77,7 +53,7 @@ class Module(Module, multiprocessing.Process):
             proto = flow_dict['proto'].upper()
             dport_name = flow_dict.get('appproto', '')
             if not dport_name:
-                dport_name = __database__.get_port_info(
+                dport_name = self.db.get_port_info(
                     f'{str(dport)}/{proto.lower()}'
                 )
                 if dport_name:
@@ -128,7 +104,7 @@ class Module(Module, multiprocessing.Process):
                 if self.analysis_direction == 'all' and str(daddr) == str(
                         profile_ip
                 ):
-                    dns_resolution = __database__.get_dns_resolution(daddr)
+                    dns_resolution = self.db.get_dns_resolution(daddr)
                     dns_resolution = dns_resolution.get('domains', [])
 
                     # we should take only one resolution, if there is more than 3, because otherwise it does not fit in the timeline.
@@ -179,7 +155,7 @@ class Module(Module, multiprocessing.Process):
                         critical_warning_dport_name = (
                             'Protocol not recognized by Slips nor Zeek.'
                         )
-                    dns_resolution = __database__.get_dns_resolution(daddr)
+                    dns_resolution = self.db.get_dns_resolution(daddr)
                     dns_resolution = dns_resolution.get('domains', [])
 
                     # we should take only one resolution, if there is more than 3, because otherwise it does not fit in the timeline.
@@ -210,14 +186,14 @@ class Module(Module, multiprocessing.Process):
                 warning = ''
                 if type(sport) == int:
                     # zeek puts the number
-                    if sport == 8:
-                        dport_name = 'PING echo'
-
-                    elif sport == 11:
+                    if sport == 11:
                         dport_name = 'ICMP Time Excedded in Transit'
 
                     elif sport == 3:
                         dport_name = 'ICMP Destination Net Unreachable'
+
+                    elif sport == 8:
+                        dport_name = 'PING echo'
 
                     else:
                         dport_name = 'ICMP Unknown type'
@@ -233,7 +209,7 @@ class Module(Module, multiprocessing.Process):
                         dport_name = 'ICMP Host Unreachable'
                     elif '0x0303' in sport:
                         dport_name = 'ICMP Port Unreachable'
-                        warning =  'unreachable port is ' + str(int(dport, 16))
+                        warning = f'unreachable port is {int(dport, 16)}'
                     elif '0x000b' in sport:
                         dport_name = ''
                     elif '0x0003' in sport:
@@ -279,19 +255,19 @@ class Module(Module, multiprocessing.Process):
             # Sometimes we need to wait a little to give time to Zeek to find the related flow since they are read very fast together.
             # This should be improved algorithmically probably
             time.sleep(0.05)
-            alt_flow_json = __database__.get_altflow_from_uid(
+            alt_flow: dict = self.db.get_altflow_from_uid(
                 profileid, twid, uid
             )
 
             alt_activity = {}
             http_data = {}
-            if alt_flow_json:
-                alt_flow = json.loads(alt_flow_json)
+            if alt_flow:
+                flow_type = alt_flow['type_']
                 self.print(
-                    f"Received an altflow of type {alt_flow['type']}: {alt_flow}",
+                    f"Received an altflow of type {flow_type}: {alt_flow}",
                     3, 0
                 )
-                if 'dns' in alt_flow['type']:
+                if 'dns' in flow_type:
                     answer = alt_flow['answers']
                     if 'NXDOMAIN' in alt_flow['rcode_name']:
                         answer = 'NXDOMAIN'
@@ -303,7 +279,7 @@ class Module(Module, multiprocessing.Process):
                         'info': dns_activity,
                         'critical warning':'',
                     }
-                elif alt_flow['type'] == 'http':
+                elif flow_type == 'http':
                     http_data_all = {
                         'Request': alt_flow['method']
                         + ' http://'
@@ -319,16 +295,16 @@ class Module(Module, multiprocessing.Process):
                     http_data = {
                         k: v
                         for k, v in http_data_all.items()
-                        if v is not '' and v is not '/'
+                        if v != '' and v != '/'
                     }
                     alt_activity = {'info': http_data}
-                elif alt_flow['type'] == 'ssl':
+                elif flow_type == 'ssl':
                     if alt_flow['validation_status'] == 'ok':
                         validation = 'Yes'
                         resumed = 'False'
                     elif (
                         not alt_flow['validation_status']
-                        and alt_flow['resumed'] == True
+                        and alt_flow['resumed'] is True
                     ):
                         # If there is no validation and it is a resumed ssl.
                         # It means that there was a previous connection with
@@ -351,7 +327,7 @@ class Module(Module, multiprocessing.Process):
                         'dns_resolution': alt_flow['server_name']
                     }
                     alt_activity = {'info': ssl_activity}
-                elif alt_flow['type'] == 'ssh':
+                elif flow_type == 'ssh':
                     success = 'Successful' if alt_flow[
                         'auth_success'] else 'Not Successful'
                     ssh_activity = {
@@ -368,7 +344,7 @@ class Module(Module, multiprocessing.Process):
             # Combine the activity of normal flows and activity of alternative flows and store in the DB for this profileid and twid
             activity.update(alt_activity)
             if activity:
-                __database__.add_timeline_line(
+                self.db.add_timeline_line(
                     profileid, twid, activity, timestamp
                 )
             self.print(
@@ -377,7 +353,7 @@ class Module(Module, multiprocessing.Process):
             )
 
 
-        except Exception as ex:
+        except Exception:
             exception_line = sys.exc_info()[2].tb_lineno
             self.print(
                 f'Problem on process_flow() line {exception_line}', 0, 1
@@ -385,40 +361,20 @@ class Module(Module, multiprocessing.Process):
             self.print(traceback.print_exc(),0,1)
             return True
 
-    def shutdown_gracefully(self):
-        # Confirm that the module is done processing
-        __database__.publish('finished_modules', self.name)
-
-    def run(self):
+    def pre_main(self):
         utils.drop_root_privs()
-        # Main loop function
-        while True:
-            try:
-                message = __database__.get_message(self.c1)
-                # Check that the message is for you. Probably unnecessary...
-                # if timewindows are not updated for a long time (see at logsProcess.py),
-                # we will stop slips automatically.The 'stop_process' line is sent from logsProcess.py.
-                if message and message['data'] == 'stop_process':
-                    self.shutdown_gracefully()
-                    return True
 
-                if utils.is_msg_intended_for(message, 'new_flow'):
-                    mdata = message['data']
-                    # Convert from json to dict
-                    mdata = json.loads(mdata)
-                    profileid = mdata['profileid']
-                    twid = mdata['twid']
-                    flow = mdata['flow']
-                    timestamp = mdata['stime']
-                    flow = json.loads(flow)
-                    return_value = self.process_flow(
-                        profileid, twid, flow, timestamp
-                    )
-            except KeyboardInterrupt:
-                self.shutdown_gracefully()
-                return True
-            except Exception as inst:
-                exception_line = sys.exc_info()[2].tb_lineno
-                self.print(f'Problem on the run() line {exception_line}', 0, 1)
-                self.print(traceback.format_exc(), 0, 1)
-                return True
+    def main(self):
+        # Main loop function
+        if msg:= self.get_msg('new_flow'):
+            mdata = msg['data']
+            # Convert from json to dict
+            mdata = json.loads(mdata)
+            profileid = mdata['profileid']
+            twid = mdata['twid']
+            flow = mdata['flow']
+            timestamp = mdata['stime']
+            flow = json.loads(flow)
+            self.process_flow(
+                profileid, twid, flow, timestamp
+            )

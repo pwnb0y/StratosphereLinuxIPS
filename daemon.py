@@ -1,7 +1,4 @@
-from slips_files.common.slips_utils import utils
-from slips_files.core.database.database import __database__
-import configparser
-from slips_files.common.config_parser import ConfigParser
+from slips_files.common.imports import *
 import sys
 import os
 from signal import SIGTERM
@@ -17,7 +14,7 @@ class Daemon():
 
         # this is a conf file used to store the pid of the daemon and is deleted when the daemon stops
         self.pidfile_dir = '/var/lock'
-        self.pidfile = os.path.join(self.pidfile_dir, 'slips.lock')
+        self.pidfile = os.path.join(self.pidfile_dir, 'slips_daemon.lock')
         self.read_configuration()
         if not self.slips.args.stopdaemon:
             self.prepare_output_dir()
@@ -198,7 +195,7 @@ class Daemon():
         get information about the last opened slips daemon from running_slips_info.txt
         """
         try:
-            with open(self.slips.running_logfile, 'r') as f:
+            with open(self.slips.redis_man.running_logfile, 'r') as f:
                 # read the lines in reverse order to get the last opened daemon
                 for line in f.read().splitlines()[::-1]:
                     # skip comments
@@ -216,7 +213,7 @@ class Daemon():
                     return (port, output_dir, slips_pid)
         except FileNotFoundError:
             # file removed after daemon started
-            self.print(f"Warning: {self.slips.running_logfile} is not found. Can't get daemon info."
+            self.print(f"Warning: {self.slips.redis_man.running_logfile} is not found. Can't get daemon info."
                        f" Slips won't be completely killed.")
             return False
 
@@ -244,6 +241,16 @@ class Daemon():
         self.stdout = 'slips.log'
         self.logsfile = 'slips.log'
         self.prepare_std_streams(output_dir)
-        __database__.start(port)
-        self.slips.c1 = __database__.subscribe('finished_modules')
-        self.slips.shutdown_gracefully()
+        db = DBManager(output_dir,
+                       multiprocessing.Queue(),
+                       port,
+                       start_sqlite=False,
+                       flush_db=False)
+        db.set_slips_mode('daemonized')
+        self.slips.set_mode('daemonized', daemon=self)
+        # used in shutdown gracefully to print the name of the stopped file in slips.log
+        self.slips.input_information = db.get_input_file()
+        self.slips.db = db
+        # set file used by proc_manto log if slips was shutdown gracefully
+        self.slips.proc_man.slips_logfile = self.logsfile
+        self.slips.proc_man.shutdown_gracefully()

@@ -6,35 +6,21 @@
 #    cp modules/template/template.py modules/anomaly_detector/anomaly_detector.py
 # 3. Make it a module
 #    touch modules/template/__init__.py
-# 4. Change the name of the module, description and author in the variables
-# 5. The file name of the python module (template.py) MUST be the same as the name of the folder (template)
-# 6. The variable 'name' MUST have the public name of this module. This is used to ignore the module
-# 7. The name of the class MUST be 'Module', do not change it.
+# 4. Change the name of the class, the module name, description and author in the variables
+# 5. The file name of the python file (template.py) MUST be the same as the name of the folder (template)
+# 6. The variable 'name' MUST have the public name of this module. This is used to be able to disable the module later
 
 # Must imports
-from slips_files.common.abstracts import Module
-import multiprocessing
-from slips_files.core.database.database import __database__
-from slips_files.common.config_parser import ConfigParser
-from slips_files.common.slips_utils import utils
-import sys
-import traceback
-
-# Your imports
+from slips_files.common.imports import *
 
 
-class Module(Module, multiprocessing.Process):
+class Template(Module, multiprocessing.Process):
     # Name: short name of the module. Do not use spaces
     name = 'Template'
     description = 'Template module'
     authors = ['Template Author']
 
-    def __init__(self, outputqueue, redis_port):
-        multiprocessing.Process.__init__(self)
-        # All the printing output should be sent to the outputqueue.
-        # The outputqueue is connected to another process called OutputProcess
-        self.outputqueue = outputqueue
-        __database__.start(redis_port)
+    def init(self):
         # To which channels do you wnat to subscribe? When a message
         # arrives on the channel the module will wakeup
         # The options change, so the last list is on the
@@ -43,54 +29,22 @@ class Module(Module, multiprocessing.Process):
         # - tw_modified
         # - evidence_added
         # Remember to subscribe to this channel in database.py
-        self.c1 = __database__.subscribe('new_ip')
+        self.c1 = self.db.subscribe('new_ip')
+        self.channels = {
+            'new_ip': self.c1,
+        }
 
-    def print(self, text, verbose=1, debug=0):
+    def pre_main(self):
         """
-        Function to use to print text using the outputqueue of slips.
-        Slips then decides how, when and where to print this text by taking all the processes into account
-        :param verbose:
-            0 - don't print
-            1 - basic operation/proof of work
-            2 - log I/O operations and filenames
-            3 - log database/profile/timewindow changes
-        :param debug:
-            0 - don't print
-            1 - print exceptions
-            2 - unsupported and unhandled types (cases that may cause errors)
-            3 - red warnings that needs examination - developer warnings
-        :param text: text to print. Can include format like 'Test {}'.format('here')
+        Initializations that run only once before the main() function runs in a loop
         """
-
-        levels = f'{verbose}{debug}'
-        self.outputqueue.put(f'{levels}|{self.name}|{text}')
-
-    def shutdown_gracefully(self):
-        # Confirm that the module is done processing
-        __database__.publish('finished_modules', self.name)
-
-    def run(self):
         utils.drop_root_privs()
-        # Main loop function
-        while True:
-            try:
-                message = __database__.get_message(self.c1)
-                # Check that the message is for you. Probably unnecessary...
-                if message and message['data'] == 'stop_process':
-                    self.shutdown_gracefully()
-                    return True
 
-                if message and message['channel'] == 'new_ip':
-                    # Example of printing the number of profiles in the
-                    # Database every second
-                    data = len(__database__.getProfiles())
-                    self.print('Amount of profiles: {}'.format(data), 3, 0)
+    def main(self):
+        """Main loop function"""
+        if msg:= self.get_msg('new_ip'):
+            # Example of printing the number of profiles in the
+            # Database every second
+            data = len(self.db.getProfiles())
+            self.print(f'Amount of profiles: {data}', 3, 0)
 
-            except KeyboardInterrupt:
-                self.shutdown_gracefully()
-                return True
-            except Exception as inst:
-                exception_line = sys.exc_info()[2].tb_lineno
-                self.print(f'Problem on the run() line {exception_line}', 0, 1)
-                self.print(traceback.format_exc(), 0, 1)
-                return True

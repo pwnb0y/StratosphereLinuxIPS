@@ -17,8 +17,7 @@ class ArgumentParser(argparse.ArgumentParser):
 
     def add_argument(self, *args, **kwargs):
         super(ArgumentParser, self).add_argument(*args, **kwargs)
-        option = {}
-        option['flags'] = [item for item in args]
+        option = {'flags': list(args)}
         for key in kwargs:
             option[key] = kwargs[key]
         self.options.append(option)
@@ -33,16 +32,16 @@ class ArgumentParser(argparse.ArgumentParser):
 
         # Print usage
         if 'usage' in self.program:
-            print('Usage: %s' % self.program['usage'])
+            print(f"Usage: {self.program['usage']}")
         else:
             usage = []
             for option in self.options:
                 usage += [
-                    '[%s|%s]' % (item, option['metavar'])
+                    f"[{item}|{option['metavar']}]"
                     if 'metavar' in option
-                    else '[%s|%s]' % (item, option['dest'].upper())
+                    else f"[{item}|{option['dest'].upper()}]"
                     if 'dest' in option
-                    else '[%s]' % item
+                    else f'[{item}]'
                     for item in option['flags']
                 ]
             wrapper.initial_indent = 'Usage: %s ' % os.path.basename(
@@ -60,7 +59,7 @@ class ArgumentParser(argparse.ArgumentParser):
         for option in self.options:
             option['flags2'] = ' '.join(
                 [
-                    '|'.join([item for item in option['flags']]),
+                    '|'.join(list(option['flags'])),
                     option['metavar'] if 'metavar' in option else '',
                 ]
             )
@@ -68,7 +67,7 @@ class ArgumentParser(argparse.ArgumentParser):
             if len(option['flags2']) > maxlen:
                 maxlen = len(option['flags2'])
         for option in self.options:
-            template = ' %-' + str(maxlen) + 's  | '
+            template = f' %-{str(maxlen)}s  | '
             wrapper.initial_indent = template % option['flags2']
             wrapper.subsequent_indent = len(wrapper.initial_indent) * ' '
             if 'help' in option and 'default' in option:
@@ -84,9 +83,9 @@ class ArgumentParser(argparse.ArgumentParser):
                 output = wrapper.fill(output)
             elif 'default' in option:
                 output = (
-                    "Default: '%s'" % option['default']
+                    f"Default: '{option['default']}'"
                     if isinstance(option['default'], str)
-                    else 'Default: %s' % str(option['default'])
+                    else f"Default: {str(option['default'])}"
                 )
                 output = wrapper.fill(output)
             else:
@@ -142,11 +141,10 @@ class ArgumentParser(argparse.ArgumentParser):
             metavar='<file>',
             action='store',
             required=False,
-            help='Read and automatically recognize a Zeek dir with all logs, '
-                 'a Zeek conn.log file (TAB separated or JSON), '
-                 'a Suricata JSON file with flows, an Argus binetflow file, a PCAP file or a nfdump file. '
-                 'Also use the word "zeek" to specify read from stdin of Zeek files, '
-                 'or "suricata" to specify stdin of suricata files.',
+            help='Read a Zeek dir with all logs, '
+                 'a Zeek conn.log file (tab-separated or JSON), '
+                 'a Suricata JSON file, an Argus binetflow file, a PCAP file or a nfdump file. '
+                 'The word "zeek" is used to read from zeek lines from stdin. '
         )
         self.add_argument(
             '-i',
@@ -155,13 +153,6 @@ class ArgumentParser(argparse.ArgumentParser):
             action='store',
             required=False,
             help='Read packets from an interface.',
-        )
-        self.add_argument(
-            '-l',
-            '--createlogfiles',
-            action='store_true',
-            required=False,
-            help='Create log files with all the traffic info and detections.',
         )
         self.add_argument(
             '-F',
@@ -198,6 +189,7 @@ class ArgumentParser(argparse.ArgumentParser):
             '-o',
             '--output',
             action='store',
+            metavar='<dir>',
             required=False,
             default=self.alerts_default_path,
             help='Store alerts.json and alerts.txt in the given folder.',
@@ -213,6 +205,7 @@ class ArgumentParser(argparse.ArgumentParser):
             '-d',
             '--db',
             action='store',
+            metavar='<redis .rdb file>',
             required=False,
             help='Read an analysed file (rdb) from disk.',
         )
@@ -249,6 +242,7 @@ class ArgumentParser(argparse.ArgumentParser):
         self.add_argument(
             '-P',
             '--port',
+            metavar='<port_number>',
             action='store',
             required=False,
             help='The redis-server port to use',
@@ -280,6 +274,19 @@ class ArgumentParser(argparse.ArgumentParser):
             action='store_true',
             required=False,
             help='Print Slips Version',
+        )
+        self.add_argument(
+            '-im',
+            '--input-module',
+            action='store',
+            metavar='<module_name>',
+            required=False,
+            help='Read flows from a module other than input process.',
+        )
+        self.add_argument(
+            '--no-recurse',
+            action='store_true',
+            help='Internal use only, prevents infinite recursion for cpu profiler dev mode multiprocess tracking'
         )
         try:
             self.add_argument(

@@ -1,8 +1,4 @@
-from slips_files.common.abstracts import Module
-from slips_files.common.config_parser import ConfigParser
-from slips_files.core.database.database import __database__
-from slips_files.common.slips_utils import utils
-import multiprocessing
+from slips_files.common.imports import *
 import sys
 from ..CESNET.warden_client import Client, read_cfg
 import os
@@ -15,40 +11,19 @@ import validators
 import traceback
 
 
-class Module(Module, multiprocessing.Process):
+class CESNET(Module, multiprocessing.Process):
     name = 'CESNET'
     description = 'Send and receive alerts from warden servers.'
     authors = ['Alya Gomaa']
 
-    def __init__(self, outputqueue, redis_port):
-        multiprocessing.Process.__init__(self)
-        # All the printing output should be sent to the outputqueue.
-        # The outputqueue is connected to another process called OutputProcess
-        self.outputqueue = outputqueue
-        __database__.start(redis_port)
+    def init(self):
         self.read_configuration()
-        self.c1 = __database__.subscribe('export_evidence')
+        self.c1 = self.db.subscribe('export_evidence')
+        self.channels = {
+            'export_evidence' : self.c1,
+        }
         self.stop_module = False
 
-    def print(self, text, verbose=1, debug=0):
-        """
-        Function to use to print text using the outputqueue of slips.
-        Slips then decides how, when and where to print this text by taking all the processes into account
-        :param verbose:
-            0 - don't print
-            1 - basic operation/proof of work
-            2 - log I/O operations and filenames
-            3 - log database/profile/timewindow changes
-        :param debug:
-            0 - don't print
-            1 - print exceptions
-            2 - unsupported and unhandled types (cases that may cause errors)
-            3 - red warnings that needs examination - developer warnings
-        :param text: text to print. Can include format like 'Test {}'.format('here')
-        """
-
-        levels = f'{verbose}{debug}'
-        self.outputqueue.put(f'{levels}|{self.name}|{text}')
 
     def read_configuration(self):
         """Read importing/exporting preferences from slips.conf"""
@@ -115,7 +90,7 @@ class Module(Module, multiprocessing.Process):
         """
         return 'Source' in evidence_in_IDEA or 'Target' in evidence_in_IDEA
 
-    def export_evidence(self, wclient, evidence: dict):
+    def export_evidence(self, evidence: dict):
         """
         Exports evidence to warden server
         """
@@ -172,13 +147,13 @@ class Module(Module, multiprocessing.Process):
 
         # [2] Upload to warden server
         self.print(
-            f'Uploading 1 event to warden server.', 2, 0
+            'Uploading 1 event to warden server.', 2, 0
         )
         # create a thread for sending alerts to warden server
         # and don't stop this module until the thread is done
         q = queue.Queue()
         self.sender_thread = threading.Thread(
-            target=wclient.sendEvents, args=[[evidence_in_IDEA], q]
+            target=self.wclient.sendEvents, args=[[evidence_in_IDEA], q]
         )
         self.sender_thread.start()
         self.sender_thread.join()
@@ -192,7 +167,7 @@ class Module(Module, multiprocessing.Process):
         except KeyError:
             self.print(result, 0, 1)
 
-    def import_alerts(self, wclient):
+    def import_alerts(self):
         events_to_get = 100
 
         cat = [
@@ -218,7 +193,7 @@ class Module(Module, multiprocessing.Process):
         nogroup = []
 
         self.print(f'Getting {events_to_get} events from warden server.')
-        events = wclient.getEvents(
+        events = self.wclient.getEvents(
             count=events_to_get,
             cat=cat,
             nocat=nocat,
@@ -229,7 +204,7 @@ class Module(Module, multiprocessing.Process):
         )
 
         if len(events) == 0:
-            self.print(f'Error getting event from warden server.')
+            self.print('Error getting event from warden server.')
             return False
 
         # now that we received from warden server,
@@ -286,20 +261,16 @@ class Module(Module, multiprocessing.Process):
 
                 src_ips.update({srcip: json.dumps(event_info)})
 
-        __database__.add_ips_to_IoC(src_ips)
+        self.db.add_ips_to_IoC(src_ips)
 
-    def shutdown_gracefully(self):
-        # Confirm that the module is done processing
-        __database__.publish('finished_modules', self.name)
-
-    def run(self):
+    def pre_main(self):
         utils.drop_root_privs()
         # Stop module if the configuration file is invalid or not found
         if self.stop_module:
-            return False
+            return 1
 
         # create the warden client
-        wclient = Client(**read_cfg(self.configuration_file))
+        self.wclient = Client(**read_cfg(self.configuration_file))
 
         # All methods return something.
         # If you want to catch possible errors (for example implement some
@@ -313,41 +284,22 @@ class Module(Module, multiprocessing.Process):
         # self.print(info, 0, 1)
 
         self.node_info = [
-            {'Name': wclient.name, 'Type': ['IPS'], 'SW': ['Slips']}
+            {'Name': self.wclient.name, 'Type': ['IPS'], 'SW': ['Slips']}
         ]
 
-        while True:
-            try:
-                message = __database__.get_message(self.c1)
-                if message and message['data'] == 'stop_process':
-                    self.shutdown_gracefully()
-                    return True
+    def main(self):
+        if self.receive_from_warden:
+            last_update = self.db.get_last_warden_poll_time()
+            now = time.time()
+            # did we wait the poll_delay period since last poll?
+            if last_update + self.poll_delay < now:
+                self.import_alerts()
+                # set last poll time to now
+                self.db.set_last_warden_poll_time(now)
 
-                if self.receive_from_warden:
-                    last_update = __database__.get_last_warden_poll_time()
-                    now = time.time()
-                    # did we wait the poll_delay period since last poll?
-                    if last_update + self.poll_delay < now:
-                        self.import_alerts(wclient)
-                        # set last poll time to now
-                        __database__.set_last_warden_poll_time(now)
-
-                # in case of an interface or a file, push every time we get an alert
-                if (
-                    utils.is_msg_intended_for(message, 'export_evidence')
-                    and self.send_to_warden
-                ):
-                    evidence = json.loads(message['data'])
-                    self.export_evidence(wclient, evidence)
-
-            except KeyboardInterrupt:
-                # Confirm that the module is done processing
-                self.shutdown_gracefully()
-                return True
-
-            except Exception as inst:
-                exception_line = sys.exc_info()[2].tb_lineno
-                self.print(f'Problem on the run() line {exception_line}', 0, 1)
-                self.print(traceback.format_exc(), 0, 1)
-
-                return True
+        # in case of an interface or a file, push every time we get an alert
+        msg = self.get_msg('export_evidence')
+        if msg and self.send_to_warden:
+            self.msg_received = True
+            evidence = json.loads(msg['data'])
+            self.export_evidence(evidence)

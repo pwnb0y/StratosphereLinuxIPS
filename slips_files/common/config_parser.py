@@ -41,11 +41,9 @@ class ConfigParser(object):
         return parser.get_configfile()
 
     def get_parser(self, help=False):
-        parser = ArgumentParser(
+        return ArgumentParser(
             usage='./slips.py -c <configfile> [options] [file]', add_help=help
         )
-        return parser
-
 
 
     def get_args(self):
@@ -82,7 +80,7 @@ class ConfigParser(object):
 
         try:
             return float(threshold)
-        except Exception as ex:
+        except Exception:
             return 5
 
 
@@ -94,7 +92,7 @@ class ConfigParser(object):
 
         try:
             return int(threshold)
-        except Exception as ex:
+        except Exception:
             return 700
 
 
@@ -105,11 +103,9 @@ class ConfigParser(object):
         """
         Returns a list of network objects if defined in slips.conf. or False
         """
-        home_net = self.read_configuration(
+        if home_net := self.read_configuration(
             'parameters', 'home_network', False
-        )
-
-        if home_net:
+        ):
             # we have home_network param set in slips.conf
             home_nets = home_net.replace(']','').replace('[','').split(',')
             home_nets = [network.strip() for network in home_nets]
@@ -135,9 +131,7 @@ class ConfigParser(object):
         pcapfilter = self.read_configuration(
             'parameters', 'pcapfilter', 'no'
         )
-        if pcapfilter in ('no'):
-            return False
-        return pcapfilter
+        return False if pcapfilter in ('no') else pcapfilter
 
     def online_whitelist(self):
         return self.read_configuration(
@@ -170,7 +164,23 @@ class ConfigParser(object):
         popups = self.read_configuration(
             'detection', 'popup_alerts', 'False'
         )
-        return  'yes' in popups.lower() 
+        return 'yes' in popups.lower()
+
+    def export_labeled_flows(self):
+        export = self.read_configuration(
+            'parameters', 'export_labeled_flows', 'no'
+        )
+        return 'yes' in export.lower()
+
+    def export_labeled_flows_to(self):
+        export = self.read_configuration(
+            'parameters', 'export_format', 'None'
+        ).lower()
+        if 'tsv' in export:
+            return 'tsv'
+        if 'json' in export:
+            return 'json'
+        return False
 
     def rotation(self):
         rotation = self.read_configuration(
@@ -182,17 +192,7 @@ class ConfigParser(object):
         store_a_copy_of_zeek_files = self.read_configuration(
             'parameters', 'store_a_copy_of_zeek_files', 'no'
         )
-        return (
-            False
-            if 'no' in store_a_copy_of_zeek_files.lower()
-            else True
-        )
-
-    def create_log_files(self):
-        do_logs = self.read_configuration(
-            'parameters', 'create_log_files', 'no'
-        )
-        return  'yes' in do_logs 
+        return 'no' not in store_a_copy_of_zeek_files.lower()
 
     def whitelist_path(self):
         return self.read_configuration(
@@ -226,17 +226,6 @@ class ConfigParser(object):
         return self.read_configuration(
             'timestamp', 'format', None
         )
-
-
-    def log_report_time(self):
-        time = self.read_configuration(
-            'parameters', 'log_report_time', 5
-        )
-        try:
-            time = int(time)
-        except ValueError:
-            time = 5
-        return time
 
     def delete_zeek_files(self):
         delete = self.read_configuration(
@@ -303,18 +292,21 @@ class ConfigParser(object):
             sec = int(sec)
 
             res = ''
-            if hrs:
+            if hrs := hrs:
                 res += f'{hrs} hrs '
                 # remove the s
-                if hrs == 1: res=res[:-2] + ' '
+                if hrs == 1:
+                    res = f'{res[:-2]} '
 
-            if mins:
+            if mins := mins:
                 res += f'{mins} mins '
-                if mins == 1: res=res[:-2] + ' '
+                if mins == 1:
+                    res = f'{res[:-2]} '
 
-            if sec:
+            if sec := sec:
                 res += f'{sec} seconds '
-                if sec == 1: res=res[:-2] + ' '
+                if sec == 1:
+                    res = f'{res[:-2]} '
 
             if res.endswith(' '): res=res[:-1]
             return res
@@ -328,24 +320,17 @@ class ConfigParser(object):
                                                 'metadata_dir',
                                                 'no'
                                                 )
-        return (
-            False if 'no' in enable_metadata.lower() else True
-        )
+        return 'no' not in enable_metadata.lower()
 
     def use_p2p(self):
         use_p2p = self.read_configuration(
             'P2P', 'use_p2p', 'no'
         )
-        return (
-            False if 'no' in use_p2p.lower() else True
-        )
+        return 'no' not in use_p2p.lower()
 
 
     def cesnet_conf_file(self):
-        file = self.read_configuration(
-            'CESNET', 'configuration_file', False
-        )
-        return file
+        return self.read_configuration('CESNET', 'configuration_file', False)
 
     def poll_delay(self):
         poll_delay = self.read_configuration(
@@ -363,17 +348,13 @@ class ConfigParser(object):
         send_to_warden = self.read_configuration(
             'CESNET', 'send_alerts', 'no'
         ).lower()
-        return (
-            False if 'no' in send_to_warden.lower() else True
-        )
+        return 'no' not in send_to_warden.lower()
 
     def receive_from_warden(self):
         receive_from_warden = self.read_configuration(
             'CESNET', 'receive_alerts', 'no'
         ).lower()
-        return (
-            False if 'no' in receive_from_warden.lower() else True
-        )
+        return 'no' not in receive_from_warden.lower()
 
     def verbose(self):
         verbose = self.read_configuration(
@@ -381,9 +362,7 @@ class ConfigParser(object):
         )
         try:
             verbose = int(verbose)
-            if verbose < 1:
-                verbose = 1
-            return verbose
+            return max(verbose, 1)
         except ValueError:
             return 1
 
@@ -393,39 +372,31 @@ class ConfigParser(object):
         )
         try:
             debug = int(debug)
-            if debug < 0:
-                debug = 0
+            debug = max(debug, 0)
         except ValueError:
             debug = 0
         return debug
 
     def export_to(self):
-        export_to = self.read_configuration(
-            'exporting_alerts', 'export_to', '[]'
-        )\
-            .replace(']','')\
-            .replace('[','')\
-            .replace(' ', '')\
-            .lower().split(',')
-        return export_to
+        return (
+            self.read_configuration('exporting_alerts', 'export_to', '[]')
+            .replace(']', '')
+            .replace('[', '')
+            .replace(' ', '')
+            .lower()
+            .split(',')
+        )
 
     def slack_token_filepath(self):
-        file = self.read_configuration(
-            'exporting_alerts', 'slack_api_path', False
-        )
-        return file
+        return self.read_configuration('exporting_alerts', 'slack_api_path', False)
 
     def slack_channel_name(self):
-        channel = self.read_configuration(
+        return self.read_configuration(
             'exporting_alerts', 'slack_channel_name', False
         )
-        return channel
 
     def sensor_name(self):
-        sensor = self.read_configuration(
-            'exporting_alerts', 'sensor_name', False
-        )
-        return sensor
+        return self.read_configuration('exporting_alerts', 'sensor_name', False)
 
 
     def taxii_server(self):
@@ -638,7 +609,7 @@ class ConfigParser(object):
         delete = self.read_configuration(
              'parameters', 'deletePrevdb', True
         )
-        return False if delete == 'False' else True
+        return delete != 'False'
 
     def rotation_period(self):
         rotation_period = self.read_configuration(
@@ -694,6 +665,30 @@ class ConfigParser(object):
              'parameters', 'label', 'unknown'
         )
 
+    def get_UID(self):
+        return int(self.read_configuration(
+             'Docker', 'UID', 0
+        ))
+
+    def get_GID(self):
+        return int(self.read_configuration(
+             'Docker', 'GID', 0
+        ))
+
+    def reading_flows_from_cyst(self):
+        custom_flows = '-im' in sys.argv or '--input-module' in sys.argv
+        if not custom_flows:
+            return False
+
+        # are we reading custom flows from cyst module?
+        for param in ('--input-module', '-im'):
+            try:
+                if 'CYST' in sys.argv[sys.argv.index(param) + 1]:
+                    return True
+            except ValueError:
+                # param isn't used
+                pass
+
     def get_disabled_modules(self, input_type) -> list:
         """
         Uses input type to enable leak detector only on pcaps
@@ -717,7 +712,7 @@ class ConfigParser(object):
                 'stix' not in export_to
                 and 'slack' not in export_to
         ):
-            to_ignore.append('exporting_alerts')
+            to_ignore.append('Exporting Alerts')
 
         if (
                 not use_p2p
@@ -744,8 +739,34 @@ class ConfigParser(object):
         if input_type != 'pcap':
             to_ignore.append('leak_detector')
 
+        if not self.reading_flows_from_cyst():
+            to_ignore.append('CYST')
+
         return to_ignore
+    
+    def get_cpu_profiler_enable(self):
+        return self.read_configuration('Profiling', 'cpu_profiler_enable', 'no')
 
-
-
-
+    def get_cpu_profiler_mode(self):
+        return self.read_configuration('Profiling', 'cpu_profiler_mode', 'dev')
+    
+    def get_cpu_profiler_multiprocess(self):
+        return self.read_configuration('Profiling', 'cpu_profiler_multiprocess', 'yes')
+    
+    def get_cpu_profiler_output_limit(self) -> int:
+        return int(self.read_configuration('Profiling', 'cpu_profiler_output_limit', 20))
+    
+    def get_cpu_profiler_sampling_interval(self) -> int:
+        return int(self.read_configuration('Profiling', 'cpu_profiler_sampling_interval', 5))
+    
+    def get_cpu_profiler_dev_mode_entries(self) -> int:
+        return int(self.read_configuration('Profiling', 'cpu_profiler_dev_mode_entries', 1000000))
+    
+    def get_memory_profiler_enable(self):
+        return self.read_configuration('Profiling', 'memory_profiler_enable', 'no')
+    
+    def get_memory_profiler_mode(self):
+        return self.read_configuration('Profiling', 'memory_profiler_mode', 'dev')
+    
+    def get_memory_profiler_multiprocess(self):
+        return self.read_configuration('Profiling', 'memory_profiler_multiprocess', 'yes')

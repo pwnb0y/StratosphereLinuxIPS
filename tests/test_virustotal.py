@@ -3,14 +3,10 @@
 #### NOTE: this file should conjtain as minimum tests as possible due to the 4reqs/minute vt api quota
 #####       if more than 4 calls to _api_query in a row winn cause unit tests to fail
 
-from ..modules.virustotal.virustotal import Module
+from tests.module_factory import ModuleFactory
 import pytest
 import requests
 import json
-
-def do_nothing(*args):
-    """Used to override the print function because using the self.print causes broken pipes"""
-    pass
 
 
 def get_vt_key():
@@ -43,10 +39,7 @@ def have_available_quota(api_key):
             quotas = (api_requests_daily, api_requests_hourly, api_requests_monthly)
             quotas = list(map(int, quotas))
 
-            if not any(quotas):
-                # one of the above is 0
-                return f'Not enough quota.'
-            return True
+            return True if any(quotas) else 'Not enough quota.'
         else:
             error = json.loads(response.text)['error']
             code = error['code']
@@ -64,38 +57,22 @@ def have_available_quota(api_key):
 API_KEY = get_vt_key()
 enough_quota = have_available_quota(API_KEY)
 error_msg = 'API key not found'
-if enough_quota != True:
+if enough_quota is not True:
     error_msg = f"server response {enough_quota}"
 
 valid_api_key = pytest.mark.skipif(
-    len(API_KEY) != 64 or enough_quota != True,
+    len(API_KEY) != 64 or enough_quota is not True,
     reason=f'API KEY not found or you do not have quota. error: {error_msg}',
 )
 
 
-@pytest.fixture
-def read_configuration():
-    return
-
-
-def create_virustotal_instance(outputQueue):
-    """Create an instance of virustotal.py
-    needed by every other test in this file"""
-    virustotal = Module(outputQueue, 6380)
-    # override the self.print function to avoid broken pipes
-    virustotal.print = do_nothing
-    virustotal.__read_configuration = read_configuration
-    virustotal.key_file = (
-        '/media/alya/W/SLIPPS/modules/virustotal/api_key_secret'
-    )
-    return virustotal
 
 # @pytest.mark.parametrize('ip', ['8.8.8.8'])
-# def test_api_query_(outputQueue, ip):
+# def test_api_query_(output_queue, ip):
 #     """
 #     This one depends on the available quota
 #     """
-#     virustotal = create_virustotal_instance(outputQueue)
+#     virustotal = create_virustotal_instance(output_queue, database)
 #     response = virustotal.api_query_(ip)
 #     # make sure response.status != 204 or 403
 #     assert response != {}, 'Server Error: Response code is not 200'
@@ -104,17 +81,17 @@ def create_virustotal_instance(outputQueue):
 @pytest.mark.dependency(name='sufficient_quota')
 @pytest.mark.parametrize('ip', ['8.8.8.8'])
 @valid_api_key
-def test_interpret_rsponse(outputQueue, ip):
-    virustotal = create_virustotal_instance(outputQueue)
+def test_interpret_rsponse(ip, mock_rdb):
+    virustotal = ModuleFactory().create_virustotal_obj(mock_rdb)
     response = virustotal.api_query_(ip)
     for ratio in virustotal.interpret_response(response):
         assert type(ratio) == float
 
 @pytest.mark.dependency(depends=["sufficient_quota"])
 @valid_api_key
-def test_get_domain_vt_data(outputQueue):
-    virustotal = create_virustotal_instance(outputQueue)
-    assert virustotal.get_domain_vt_data('google.com') != False
+def test_get_domain_vt_data(mock_rdb):
+    virustotal = ModuleFactory().create_virustotal_obj(mock_rdb)
+    assert virustotal.get_domain_vt_data('google.com') is not False
 
 
 

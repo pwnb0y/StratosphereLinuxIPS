@@ -1,11 +1,10 @@
-from flask import Flask, render_template, request, redirect, url_for, current_app
-from argparse import ArgumentParser
-import os.path
+from flask import Flask, render_template, redirect, url_for, current_app
 
 from database.database import __database__
 from database.signals import message_sent
 from analysis.analysis import analysis
 from general.general import general
+from documentation.documentation import documentation
 from utils import *
 
 
@@ -43,6 +42,15 @@ def set_pcap_info():
     Set information about the pcap.
     """
     info = __database__.db.hgetall("analysis")
+
+    profiles = __database__.db.smembers('profiles')
+    info["num_profiles"] = len(profiles) if profiles else 0
+
+    alerts = __database__.db.hgetall('alerts')
+    info["num_alerts"] = len(alerts) if alerts else 0
+
+
+
     return info
 
 
@@ -55,5 +63,8 @@ if __name__ == '__main__':
     app.register_blueprint(analysis, url_prefix="/analysis")
 
     app.register_blueprint(general, url_prefix="/general")
+    
+    app.register_blueprint(documentation, url_prefix="/documentation")
 
     app.run(host="0.0.0.0", port=55000)
+

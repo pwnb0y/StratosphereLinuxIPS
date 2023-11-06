@@ -1,16 +1,21 @@
 import hashlib
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
+from re import findall
 import validators
 from git import Repo
 import socket
 import requests
 import json
-import time
 import platform
 import os
 import sys
 import ipaddress
+import communityid
+from hashlib import sha1
+from base64 import b64encode
 
+
+IS_IN_A_DOCKER_CONTAINER = os.environ.get('IS_IN_A_DOCKER_CONTAINER', False)
 
 class Utils(object):
     name = 'utils'
@@ -59,6 +64,7 @@ class Utils(object):
         # this format will be used accross all modules and logfiles of slips
         self.alerts_format = '%Y/%m/%d %H:%M:%S.%f%z'
         self.local_tz = self.get_local_timezone()
+        self.community_id = communityid.CommunityID()
 
     def get_cidr_of_ip(self, ip):
         """
@@ -76,7 +82,7 @@ class Utils(object):
 
     def threat_level_to_string(self, threat_level: float):
         for str_lvl, int_value in self.threat_levels.items():
-            if float(threat_level) <= int_value:
+            if threat_level <= int_value:
                 return str_lvl
 
     def is_valid_threat_level(self, threat_level):
@@ -186,14 +192,12 @@ class Utils(object):
             datetime_obj = self.convert_to_datetime(ts)
 
         # convert to the req format
-        if required_format == 'unixtimestamp':
-            result = datetime_obj.timestamp()
-        elif required_format == 'iso':
-            result = datetime_obj.astimezone().isoformat()
+        if required_format == 'iso':
+            return datetime_obj.astimezone().isoformat()
+        elif required_format == 'unixtimestamp':
+            return datetime_obj.timestamp()
         else:
-            result = datetime_obj.strftime(required_format)
-
-        return result
+            return datetime_obj.strftime(required_format)
 
     def get_local_timezone(self):
         """
@@ -201,9 +205,7 @@ class Utils(object):
         """
         now = datetime.now()
         local_now = now.astimezone()
-        local_tz = local_now.tzinfo
-        # local_tzname = local_tz.tzname(local_now)
-        return local_tz
+        return local_now.tzinfo
 
     def convert_to_local_timezone(self, ts):
         """
@@ -229,11 +231,11 @@ class Utils(object):
 
         given_format = self.define_time_format(ts)
 
-        if given_format == 'unixtimestamp':
-            datetime_obj = datetime.fromtimestamp(float(ts))
-        else:
-            datetime_obj = datetime.strptime(ts, given_format)
-        return datetime_obj
+        return (
+            datetime.fromtimestamp(float(ts))
+            if given_format == 'unixtimestamp'
+            else datetime.strptime(ts, given_format)
+        )
 
 
     def define_time_format(self, time: str) -> str:
@@ -244,8 +246,7 @@ class Utils(object):
         try:
             # Try unix timestamp in seconds.
             datetime.fromtimestamp(float(time))
-            time_format = 'unixtimestamp'
-            return time_format
+            return 'unixtimestamp'
         except ValueError:
             pass
 
@@ -284,7 +285,7 @@ class Utils(object):
 
         try:
             response = requests.get(
-                f'http://ipinfo.io/json',
+                'http://ipinfo.io/json',
                 timeout=5,
             )
         except (
@@ -318,15 +319,15 @@ class Utils(object):
         # Is the IP multicast, private? (including localhost)
         # local_link or reserved?
         # The broadcast address 255.255.255.255 is reserved.
-        if (
-            ip_obj.is_multicast
-            or ip_obj.is_private
-            or ip_obj.is_link_local
-            or ip_obj.is_reserved
-            or '.255' in ip_obj.exploded
-        ):
-            return True
-        return False
+        return bool(
+            (
+                ip_obj.is_multicast
+                or ip_obj.is_private
+                or ip_obj.is_link_local
+                or ip_obj.is_reserved
+                or '.255' in ip_obj.exploded
+            )
+        )
 
     def get_hash_from_file(self, filename):
         """
@@ -359,9 +360,20 @@ class Utils(object):
         return (
             message
             and type(message['data']) == str
-            and message['data'] != 'stop_process'
             and message['channel'] == channel
         )
+
+    def change_logfiles_ownership(self, file: str, UID, GID):
+        """
+        if slips is running in docker, the owner of the alerts log files is always root
+        this function changes it to the user ID and GID in slips.conf to be able to
+        rwx the files from outside of docker
+        """
+        if not (IS_IN_A_DOCKER_CONTAINER and UID and GID):
+            # they should be anything other than 0
+            return
+
+        os.system(f"chown {UID}:{GID} {file}")
 
     def get_branch_info(self):
         """
@@ -373,7 +385,7 @@ class Utils(object):
             branch = repo.active_branch.name
             commit = repo.active_branch.commit.hexsha
             return (commit, branch)
-        except Exception as ex:
+        except Exception:
             # when in docker, we copy the repo instead of clone it so there's no .git files
             # we can't add repo metadata
             return False
@@ -418,6 +430,72 @@ class Utils(object):
 
         return units[return_type]
 
+    def remove_milliseconds_decimals(self, ts: str) -> str:
+        """
+        remove the milliseconds from the given ts
+        :param ts: time in unix format
+        """
+        ts = str(ts)
+        if '.' not in ts:
+            return ts
+
+        return ts.split('.')[0]
+
+
+
+    def assert_microseconds(self, ts: str):
+        """
+        adds microseconds to the given ts if not present
+        :param ts: unix ts
+        :return: ts
+        """
+        ts = self.convert_format(ts, 'unixtimestamp')
+
+        ts = str(ts)
+        # pattern of unix ts with microseconds
+        pattern = r'\b\d+\.\d{6}\b'
+        matches = findall(pattern, ts)
+
+        if not matches:
+            # fill the missing microseconds and milliseconds with 0
+            # 6 is the decimals we need after the . in the unix ts
+            ts = ts + "0" * (6 - len(ts.split('.')[-1]))
+        return ts
+
+    def get_aid(self, flow):
+        """
+        calculates the flow SHA1(cid+ts) aka All-ID of the flow
+        because we need the flow ids to be unique to be able to compare them
+        """
+        #TODO document this
+        community_id = self.get_community_id(flow)
+        ts = flow.starttime
+        ts: str = self.assert_microseconds(ts)
+
+        aid = f"{community_id}-{ts}"
+
+        # convert the input string to bytes (since hashlib works with bytes)
+        aid: str = sha1(aid.encode('utf-8')).hexdigest()
+        aid: str = b64encode(aid.encode()).decode()
+        return aid
+
+
+    def get_community_id(self, flow):
+        """
+        calculates the flow community id based of the protocol
+        """
+        proto = flow.proto.lower()
+        cases = {
+            'tcp': communityid.FlowTuple.make_tcp,
+            'udp': communityid.FlowTuple.make_udp,
+            'icmp': communityid.FlowTuple.make_icmp,
+        }
+        try:
+            tpl = cases[proto](flow.saddr, flow.daddr, flow.sport, flow.dport)
+            return self.community_id.calc(tpl)
+        except KeyError:
+            # proto doesn't have a community_id.FlowTuple  method
+            return ''
 
     def IDEA_format(
         self,
@@ -504,21 +582,16 @@ class Utils(object):
 
         elif 'domain' in attacker_direction:
             # the ioc is a domain
-            if validators.domain(attacker):
-                attacker_type = 'Hostname'
-            else:
-                attacker_type = 'URL'
-
+            attacker_type = 'Hostname' if validators.domain(attacker) else 'URL'
             target_info = {attacker_type: [attacker]}
             IDEA_dict['Target'] = [target_info]
 
             # update the dstdomain description if specified in the evidence
             if source_target_tag:
                 IDEA_dict['Target'][0].update({'Type': [source_target_tag]})
-        else:
+        elif source_target_tag:
             # the ioc is the srcip, therefore the tag is desscribing the source
-            if source_target_tag:
-                IDEA_dict['Source'][0].update({'Type': [source_target_tag]})
+            IDEA_dict['Source'][0].update({'Type': [source_target_tag]})
 
 
 
@@ -557,22 +630,20 @@ class Utils(object):
 
         # only evidence of type scanning have conn_count
         if conn_count:
-            IDEA_dict.update({'ConnCount': conn_count})
+            IDEA_dict['ConnCount'] = conn_count
 
         if 'MaliciousDownloadedFile' in evidence_type:
-            IDEA_dict.update(
+            IDEA_dict['Attach'] = [
                 {
-                    'Attach': [
-                        {
-                            'Type': ['Malware'],
-                            'Hash': [f'md5:{attacker}'],
-                            'Size': int(
-                                description.split('size:')[1].split('from')[0]
-                            ),
-                        }
-                    ]
+                    'Type': ['Malware'],
+                    'Hash': [f'md5:{attacker}'],
                 }
-            )
+
+            ]
+            if 'size' in description:
+                IDEA_dict.update(
+                    {'Size': int(description.replace(".",'').split('size:')[1].split('from')[0])}
+                )
 
         return IDEA_dict
 

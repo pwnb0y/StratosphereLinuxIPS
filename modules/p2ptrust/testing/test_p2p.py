@@ -4,7 +4,6 @@ import modules.p2ptrust.testing.json_data as json_data
 from modules.p2ptrust.utils.utils import save_ip_report_to_db
 from modules.p2ptrust.p2ptrust import Trust
 from modules.p2ptrust.trust.trustdb import TrustDB
-from slips_files.core.database.database import __database__
 from multiprocessing import Queue
 from outputProcess import OutputProcess
 import json
@@ -23,7 +22,7 @@ def init_tests(pigeon_port=6669):
 
     # Start the DB
     __database__.start()
-    __database__.setOutputQueue(output_process_queue)
+    __database__.set_output_queue(output_process_queue)
     module_process = Trust(
         output_process_queue,
         config,
@@ -43,7 +42,7 @@ def init_tests(pigeon_port=6669):
 
 def set_ip_data(ip: str, data: dict):
     # TODO: remove the first call after database is fixed
-    __database__.setNewIP(ip)
+    __database__.set_new_ip(ip)
     __database__.setInfoForIPs(ip, data)
 
 
@@ -187,14 +186,13 @@ def test_inputs():
     for test_case_name, test_case in json_data.__dict__.items():
         if test_case_name.startswith('_'):
             continue
-        else:
-            print()
-            print('#########################')
-            print('Running test case:', test_case_name)
-            print('-------------------------')
-            __database__.publish('p2p_gopy', 'go_data ' + test_case)
-            # the sleep is not needed, but it makes the log more readable
-            time.sleep(1)
+        print()
+        print('#########################')
+        print('Running test case:', test_case_name)
+        print('-------------------------')
+        __database__.publish('p2p_gopy', f'go_data {test_case}')
+        # the sleep is not needed, but it makes the log more readable
+        time.sleep(1)
 
     print('Tests done.')
 
@@ -206,18 +204,6 @@ def get_default_config():
 
 
 def make_data():
-    data = [
-        {
-            'peer': '10.0.0.4',
-            'credibility': 0.5,
-            'data': '{"remote_ip": "8.8.8.8", "score":0.0, "confidence":0.9}',
-        },
-        {
-            'peer': '10.0.0.9',
-            'credibility': 0.9,
-            'data': '{"remote_ip": "8.8.8.8", "score":0.1, "confidence":0.8}',
-        },
-    ]
 
     # the data is a list of reports from multiple peers. Each report contains information about the remote peer (his IP
     # and his credibility), and the data the peer sent. From slips, we know that the data sent contains the IP address
@@ -260,7 +246,7 @@ def slips_listener_test():
     __database__.publish('p2p_gopy', 'UPDATE ipaddress 3')
 
     data = make_data()
-    __database__.publish('p2p_gopy', 'GO_DATA %s' % data)
+    __database__.publish('p2p_gopy', f'GO_DATA {data}')
 
     # stop instruction
     __database__.publish('p2p_gopy', 'stop_process')
@@ -287,7 +273,7 @@ def test_handle_slips_update():
 
 def test_evaluation_error():
     __database__.publish(
-        'p2p_gopy', 'go_data ' + json_data.wrong_message_eval_structure
+        'p2p_gopy', f'go_data {json_data.wrong_message_eval_structure}'
     )
     # __database__.publish("p2p_gopy", "go_data " + json_data.wrong_message_type)
 
@@ -308,9 +294,8 @@ def test_pigeon():
 
 
 def test_trustdb():
-    trustdb = TrustDB(data_dir + 'trustdb.db6660', None)
+    trustdb = TrustDB(f'{data_dir}trustdb.db6660', None)
     print(trustdb.get_opinion_on_ip('1.1.1.3'))
-    k = 3
 
 
 if __name__ == '__main__':

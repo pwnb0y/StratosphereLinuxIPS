@@ -1,5 +1,4 @@
-from slips_files.core.database.database import __database__
-from slips_files.common.slips_utils import utils
+from slips_files.common.imports import *
 import time
 import ipaddress
 import ipwhois
@@ -8,7 +7,8 @@ import requests
 import maxminddb
 
 class ASN:
-    def __init__(self):
+    def __init__(self, db=None):
+        self.db = db
         # Open the maxminddb ASN offline db
         try:
             self.asn_db = maxminddb.open_database(
@@ -29,7 +29,7 @@ class ASN:
             # invalid ip or no cached asns
             return
 
-        cached_asn: str = __database__.get_asn_cache(first_octet=first_octet)
+        cached_asn: str = self.db.get_asn_cache(first_octet=first_octet)
         if not cached_asn:
             return
 
@@ -58,10 +58,7 @@ class ASN:
         :param cached_data: ip cached info from the database, dict
         """
         try:
-            update = (
-                time.time() - cached_data['asn']['timestamp']
-            ) > update_period
-            return update
+            return (time.time() - cached_data['asn']['timestamp']) > update_period
         except (KeyError, TypeError):
             # no there's no cached asn info,or no timestamp, or cached_data is None
             # we should update
@@ -107,7 +104,7 @@ class ASN:
             asn_number = whois_info.get('asn', False)
 
             if asnorg and asn_cidr not in ('', 'NA'):
-                __database__.set_asn_cache(asnorg, asn_cidr, asn_number)
+                self.db.set_asn_cache(asnorg, asn_cidr, asn_number)
                 asn_info = {
                     'asn': {
                         'number': f'AS{asn_number}',
@@ -171,7 +168,8 @@ class ASN:
 
     def update_ip_info(self, ip, cached_ip_info, asn):
         """
-        if an asn is found using this module, we update the IP's info in the db in 'IPsinfo' key with
+        if an asn is found using this module, we update the IP's
+        info in the db in 'IPsinfo' key with
         the ASN info we found
         asn is a dict with 2 keys 'number' and 'org'
         cached_ip_info: info from 'IPsInfo' key passed from ip_info.py module
@@ -179,15 +177,14 @@ class ASN:
         asn.update({'timestamp': time.time()})
         cached_ip_info.update(asn)
         # store the ASN we found in 'IPsInfo'
-        __database__.setInfoForIPs(ip, cached_ip_info)
+        self.db.setInfoForIPs(ip, cached_ip_info)
 
     def get_asn(self, ip, cached_ip_info):
         """
         Gets ASN info about IP, either cached, from our offline mmdb or from ip-api.com
         """
         # do we have asn cached for this range?
-        cached_asn: dict = self.get_cached_asn(ip)
-        if cached_asn:
+        if cached_asn := self.get_cached_asn(ip):
             self.update_ip_info(ip, cached_ip_info, cached_asn)
             return
 
@@ -195,29 +192,19 @@ class ASN:
             # now we have 2 options, either search for the ASN in our offline db, or online
             # either way we need to cache the asn of this ip's range so we don't search for ips in the same range
             # cache this range in our redis db
-            asn:dict = self.cache_ip_range(ip)
-            if asn:
+            if asn := self.cache_ip_range(ip):
                 # range is cached and we managed to get the number and org of the given ip using whois
                 # no need to search online or offline
                 self.update_ip_info(ip, cached_ip_info, asn)
                 return
 
-
             # we don't have it cached in our db, get it from geolite
-            asn: dict = self.get_asn_info_from_geolite(ip)
-            if asn:
+            if asn := self.get_asn_info_from_geolite(ip):
                 self.update_ip_info(ip, cached_ip_info, asn)
                 return
 
-
             # can't find asn in mmdb or using whois library, try using ip-info
-            asn: dict = self.get_asn_online(ip)
-            if asn:
+            if asn := self.get_asn_online(ip):
                 # found it online
                 self.update_ip_info(ip, cached_ip_info, asn)
                 return
-
-
-
-
-

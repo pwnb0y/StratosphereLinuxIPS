@@ -1,9 +1,4 @@
-from slips_files.common.abstracts import Module
-from slips_files.core.database.database import __database__
-from slips_files.common.config_parser import ConfigParser
-from slips_files.common.slips_utils import utils
-import multiprocessing
-import traceback
+from slips_files.common.imports import *
 import json
 import sys
 import ipaddress
@@ -11,21 +6,18 @@ import time
 import threading
 from multiprocessing import Queue
 
-class Module(Module, multiprocessing.Process):
+class ARP(Module, multiprocessing.Process):
     # Name: short name of the module. Do not use spaces
     name = 'ARP'
     description = 'Detect arp attacks'
     authors = ['Alya Gomaa']
-
-    def __init__(self, outputqueue, redis_port):
-        multiprocessing.Process.__init__(self)
-        # All the printing output should be sent to the outputqueue.
-        # The outputqueue is connected to another process called OutputProcess
-        self.outputqueue = outputqueue
-        # Start the DB
-        __database__.start(redis_port)
-        self.c1 = __database__.subscribe('new_arp')
-        self.c2 = __database__.subscribe('tw_closed')
+    def init(self):
+        self.c1 = self.db.subscribe('new_arp')
+        self.c2 = self.db.subscribe('tw_closed')
+        self.channels = {
+            'new_arp': self.c1,
+            'tw_closed': self.c2,
+        }
         self.read_configuration()
         # this dict will categorize arp requests by profileid_twid
         self.cache_arp_requests = {}
@@ -53,31 +45,6 @@ class Module(Module, multiprocessing.Process):
         self.time_to_wait = 10
 
 
-    def test(self):
-        """test function """
-        pass
-
-
-    def print(self, text, verbose=1, debug=0):
-        """
-        Function to use to print text using the outputqueue of slips.
-        Slips then decides how, when and where to print this text by taking all the processes into account
-        :param verbose:
-            0 - don't print
-            1 - basic operation/proof of work
-            2 - log I/O operations and filenames
-            3 - log database/profile/timewindow changes
-        :param debug:
-            0 - don't print
-            1 - print exceptions
-            2 - unsupported and unhandled types (cases that may cause errors)
-            3 - red warnings that needs examination - developer warnings
-        :param text: text to print. Can include format like 'Test {}'.format('here')
-        """
-
-        levels = f'{verbose}{debug}'
-        self.outputqueue.put(f'{levels}|{self.name}|{text}')
-
     def read_configuration(self):
         conf = ConfigParser()
         self.home_network = conf.home_network_ranges
@@ -94,7 +61,7 @@ class Module(Module, multiprocessing.Process):
         while True:
             try:
                 evidence: dict = self.pending_arp_scan_evidence.get(timeout=0.5)
-            except Exception as ex:
+            except Exception:
                 # nothing in queue
                 time.sleep(5)
                 continue
@@ -107,7 +74,7 @@ class Module(Module, multiprocessing.Process):
             while True:
                 try:
                     new_evidence = self.pending_arp_scan_evidence.get(timeout=0.5)
-                except Exception as ex:
+                except Exception:
                     # queue is empty
                     break
 
@@ -169,7 +136,7 @@ class Module(Module, multiprocessing.Process):
         saddr = profileid.split('_')[1]
 
         # Don't detect arp scan from the GW router
-        if __database__.get_gateway_ip() == saddr:
+        if self.db.get_gateway_ip() == saddr:
             return False
 
         # What is this?
@@ -241,7 +208,7 @@ class Module(Module, multiprocessing.Process):
         attacker_direction = 'srcip'
         source_target_tag = 'Recon'  # srcip description
         attacker = profileid.split('_')[1]
-        __database__.setEvidence(evidence_type, attacker_direction, attacker, threat_level, confidence, description,
+        self.db.setEvidence(evidence_type, attacker_direction, attacker, threat_level, confidence, description,
                                  ts, category, source_target_tag=source_target_tag, conn_count=conn_count,
                                  profileid=profileid, twid=twid, uid=uids)
         # after we set evidence, clear the dict so we can detect if it does another scan
@@ -278,14 +245,14 @@ class Module(Module, multiprocessing.Process):
             # comes here if the IP isn't in any of the local networks
             confidence = 0.6
             threat_level = 'low'
-            ip_identification = __database__.getIPIdentification(daddr)
+            ip_identification = self.db.get_ip_identification(daddr)
             description = f'{saddr} sending ARP packet to a destination address outside of local network: {daddr}. {ip_identification}'
             evidence_type = 'arp-outside-localnet'
             category = 'Anomaly.Behaviour'
             attacker_direction = 'srcip'
             attacker = profileid.split('_')[1]
-            __database__.setEvidence(evidence_type, attacker_direction, attacker, threat_level, confidence,
-                                     description, ts, category, profileid=profileid, twid=twid, uid=uid)
+            self.db.setEvidence(evidence_type, attacker_direction, attacker, threat_level, confidence,
+                                     description, ts, category, profileid=profileid, twid=twid, uid=uid, victim=daddr)
             return True
 
     def detect_unsolicited_arp(
@@ -308,7 +275,7 @@ class Module(Module, multiprocessing.Process):
             attacker_direction = 'srcip'
             source_target_tag = 'Recon'   # srcip description
             attacker = profileid.split('_')[1]
-            __database__.setEvidence(evidence_type, attacker_direction, attacker, threat_level, confidence,
+            self.db.setEvidence(evidence_type, attacker_direction, attacker, threat_level, confidence,
                                      description, ts, category, source_target_tag=source_target_tag,
                                      profileid=profileid, twid=twid, uid=uid)
             return True
@@ -328,8 +295,8 @@ class Module(Module, multiprocessing.Process):
         #  the original IP of this src mac is now the IP of the attacker?
 
         # get the original IP of the src mac from the database
-        original_IP = __database__.get_IP_of_MAC(src_mac)
-        if original_IP == None:
+        original_IP = self.db.get_ip_of_mac(src_mac)
+        if original_IP is None:
             return
 
         # original_IP is a serialized list
@@ -352,8 +319,8 @@ class Module(Module, multiprocessing.Process):
             source_target_tag = 'MITM'
             attacker = profileid.split('_')[1]
 
-            gateway_ip = __database__.get_gateway_ip()
-            gateway_MAC = __database__.get_gateway_MAC()
+            gateway_ip = self.db.get_gateway_ip()
+            gateway_MAC = self.db.get_gateway_mac()
 
             if saddr == gateway_ip:
                 saddr = f'The gateway {saddr}'
@@ -367,16 +334,12 @@ class Module(Module, multiprocessing.Process):
 
             description = f'{saddr} performing a MITM ARP attack. The MAC {src_mac}, ' \
                           f'now belonging to {saddr}, was seen before for {original_IP}.'
-
             # self.print(f'{saddr} is claiming to have {src_mac}')
-            __database__.setEvidence(evidence_type, attacker_direction, attacker, threat_level, confidence,
+            self.db.setEvidence(evidence_type, attacker_direction, attacker, threat_level, confidence,
                                      description, ts, category, source_target_tag=source_target_tag,
-                                     profileid=profileid, twid=twid, uid=uid)
+                                     profileid=profileid, twid=twid, uid=uid, victim=original_IP)
             return True
 
-    def shutdown_gracefully(self):
-        # Confirm that the module is done processing
-        __database__.publish('finished_modules', self.name)
 
     def check_if_gratutitous_ARP(
             self, saddr, daddr, src_mac, dst_mac, src_hw, dst_hw, operation
@@ -399,7 +362,6 @@ class Module(Module, multiprocessing.Process):
         (3) Redundancy, (4) MITM. Which is similar to an 'unrequested' load balancing
         # The saddr and daddr are the ones being avertised. The supposed purpose of the Gratuitous ARP
         """
-
         # It should be a reply
         # The dst_mac should be ff:ff:ff:ff:ff:ff or 00:00:00:00:00:00
         is_gratuitous = False
@@ -407,97 +369,81 @@ class Module(Module, multiprocessing.Process):
             is_gratuitous = True
         return is_gratuitous
 
-    def run(self):
+    def pre_main(self):
+        """ runs once before the main() is executed in a loop"""
         utils.drop_root_privs()
         self.timer_thread_arp_scan.start()
-        while True:
-            try:
-                if (
-                    self.delete_arp_periodically
-                    and time.time()
-                    >= self.arp_ts + self.period_before_deleting
-                ):
-                    # clear arp.log
-                    open('zeek_files/arp.log', 'w').close()
-                    # update ts of the new arp.log
-                    self.arp_ts = time.time()
 
-                message = __database__.get_message(self.c1)
-                if message and message['data'] == 'stop_process':
-                    self.shutdown_gracefully()
-                    return True
+    def main(self):
+        """main loop function"""
 
-                if utils.is_msg_intended_for(message, 'new_arp'):
-                    flow = json.loads(message['data'])
-                    ts = flow['ts']
-                    profileid = flow['profileid']
-                    twid = flow['twid']
-                    daddr = flow['daddr']
-                    saddr = flow['saddr']
-                    dst_mac = flow['dst_mac']
-                    src_mac = flow['src_mac']
-                    dst_hw = flow['dst_hw']
-                    src_hw = flow['src_hw']
-                    operation = flow['operation']
-                    # arp flows don't have uids, the uids received are randomly generated by slips
-                    uid = flow['uid']
+        if (
+            self.delete_arp_periodically
+            and time.time()
+            >= self.arp_ts + self.period_before_deleting
+        ):
+            # clear arp.log
+            open('zeek_files/arp.log', 'w').close()
+            # update ts of the new arp.log
+            self.arp_ts = time.time()
 
-                    # Check if it is gratuitous ARP
-                    is_gratuitous = self.check_if_gratutitous_ARP(
-                                    saddr, daddr, src_mac, dst_mac, src_hw, dst_hw, operation
-                                    )
-                    if is_gratuitous:
-                        # for MITM arp attack, the arp has to be gratuitous
-                        # and it has to be a reply operation, not a request.
-                        # A gratuitous ARP is always a reply. A MITM attack happens when there is a reply without a request
-                        self.detect_MITM_ARP_attack(
-                            profileid, twid, uid, saddr, ts, src_mac
-                        )
-                    else:
-                        # not gratuitous and request, may be an arp scan
-                        self.check_arp_scan(
-                            profileid, twid, daddr, uid, ts, dst_mac, src_mac, operation, dst_hw, src_hw
-                        )
+        if msg := self.get_msg('new_arp'):
+            flow_details = json.loads(msg['data'])
+            profileid = flow_details['profileid']
+            twid = flow_details['twid']
+            # this is the actual arp flow
+            flow: dict = flow_details['flow']
+            ts = flow['starttime']
+            daddr = flow['daddr']
+            saddr = flow['saddr']
+            dst_mac = flow['dmac']
+            src_mac = flow['smac']
+            dst_hw = flow['dst_hw']
+            src_hw = flow['src_hw']
+            operation = flow['operation']
+            # arp flows don't have uids, the uids received are randomly generated by slips
+            uid = flow['uid']
 
-                    if 'request' in operation:
-                        self.check_dstip_outside_localnet(
-                            profileid, twid, daddr, uid, saddr, ts
-                        )
-                    elif 'reply' in operation:
-                        # Unsolicited ARPs should be of type reply only, not request
-                        self.detect_unsolicited_arp(
-                            profileid,
-                            twid,
-                            uid,
-                            ts,
-                            dst_mac,
-                            src_mac,
-                            dst_hw,
-                            src_hw,
-                        )
+            if self.check_if_gratutitous_ARP(
+                saddr, daddr, src_mac, dst_mac, src_hw, dst_hw, operation
+            ):
+                # for MITM arp attack, the arp has to be gratuitous
+                # and it has to be a reply operation, not a request.
+                # A gratuitous ARP is always a reply. A MITM attack happens when there is a reply without a request
+                self.detect_MITM_ARP_attack(
+                    profileid, twid, uid, saddr, ts, src_mac
+                )
+            else:
+                # not gratuitous and request, may be an arp scan
+                self.check_arp_scan(
+                    profileid, twid, daddr, uid, ts, dst_mac, src_mac, operation, dst_hw, src_hw
+                )
 
-                # if the tw is closed, remove all its entries from the cache dict
-                message = __database__.get_message(self.c2)
-                if message and message['data'] == 'stop_process':
-                    self.shutdown_gracefully()
-                    return True
+            if 'request' in operation:
+                self.check_dstip_outside_localnet(
+                    profileid, twid, daddr, uid, saddr, ts
+                )
+            elif 'reply' in operation:
+                # Unsolicited ARPs should be of type reply only, not request
+                self.detect_unsolicited_arp(
+                    profileid,
+                    twid,
+                    uid,
+                    ts,
+                    dst_mac,
+                    src_mac,
+                    dst_hw,
+                    src_hw,
+                )
 
-                if utils.is_msg_intended_for(message, 'tw_closed'):
-                    profileid_tw = message['data']
-                    # when a tw is closed, this means that it's too old so we don't check for arp scan in this time
-                    # range anymore
-                    # this copy is made to avoid dictionary changed size during iteration err
-                    cache_copy = self.cache_arp_requests.copy()
-                    for key in cache_copy:
-                        if profileid_tw in key:
-                            self.cache_arp_requests.pop(key)
-                            # don't break, keep looking for more keys that belong to the same tw
-
-            except KeyboardInterrupt:
-                self.shutdown_gracefully()
-                return True
-            except Exception as ex:
-                exception_line = sys.exc_info()[2].tb_lineno
-                self.print(f'Problem on the run() line {exception_line}', 0, 1)
-                self.print(traceback.format_exc(), 0, 1)
-                return True
+        # if the tw is closed, remove all its entries from the cache dict
+        if msg := self.get_msg('tw_closed'):
+            profileid_tw = msg['data']
+            # when a tw is closed, this means that it's too old so we don't check for arp scan in this time
+            # range anymore
+            # this copy is made to avoid dictionary changed size during iteration err
+            cache_copy = self.cache_arp_requests.copy()
+            for key in cache_copy:
+                if profileid_tw in key:
+                    self.cache_arp_requests.pop(key)
+                    # don't break, keep looking for more keys that belong to the same tw

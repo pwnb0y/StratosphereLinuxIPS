@@ -13,9 +13,6 @@ class BaseModel(Model):
         super().__init__(*args, **kwargs)
         self.reliability_weight = 0.7
 
-    def print(self, text: str, verbose: int = 1, debug: int = 0) -> None:
-        self.printer.print('[TrustDB] ' + text, verbose, debug)
-
     def get_opinion_on_ip(self, ipaddr: str) -> (float, float, float):
         """
         Compute the network's opinion for a given IP
@@ -111,9 +108,7 @@ class BaseModel(Model):
 
         weighted_reporters = self.normalize_peer_reputations(reporters)
 
-        combined_score = sum(
-            [r[0] * w for r, w, in zip(reports, weighted_reporters)]
-        )
+        combined_score = sum(r[0] * w for r, w, in zip(reports, weighted_reporters))
         combined_confidence = sum(
             [max(0, r[1] * w) for r, w, in zip(reports, reporters)]
         ) / len(reporters)

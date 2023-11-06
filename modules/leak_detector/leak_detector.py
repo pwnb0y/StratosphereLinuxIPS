@@ -1,7 +1,4 @@
-from slips_files.common.abstracts import Module
-import multiprocessing
-from slips_files.core.database.database import __database__
-from slips_files.common.slips_utils import utils
+from slips_files.common.imports import *
 import sys
 import base64
 import time
@@ -9,19 +6,15 @@ import binascii
 import os
 import subprocess
 import json
-import traceback
 import shutil
 
-class Module(Module, multiprocessing.Process):
+class LeakDetector(Module, multiprocessing.Process):
     # Name: short name of the module. Do not use spaces
     name = 'Leak Detector'
     description = 'Detect leaks of data in the traffic'
     authors = ['Alya Gomaa']
 
-    def __init__(self, outputqueue, redis_port):
-        multiprocessing.Process.__init__(self)
-        self.outputqueue = outputqueue
-        __database__.start(redis_port)
+    def init(self):
         # this module is only loaded when a pcap is given get the pcap path
         try:
             self.pcap = utils.sanitize(sys.argv[sys.argv.index('-f') + 1])
@@ -44,36 +37,13 @@ class Module(Module, multiprocessing.Process):
         """
         cmd = 'yara -h > /dev/null 2>&1'
         returncode = os.system(cmd)
-        if returncode == 256 or returncode == 0:
+        if returncode in [256, 0]:
             # it is installed
             return True
         # elif returncode == 32512:
-        self.print(f"yara is not installed. install it using:\nsudo apt-get install yara")
+        self.print("yara is not installed. install it using:\nsudo apt-get install yara")
         return False
 
-    def shutdown_gracefully(self):
-        # Confirm that the module is done processing
-        __database__.publish('finished_modules', self.name)
-
-    def print(self, text, verbose=1, debug=0):
-        """
-        Function to use to print text using the outputqueue of slips.
-        Slips then decides how, when and where to print this text by taking all the processes into account
-        :param verbose:
-            0 - don't print
-            1 - basic operation/proof of work
-            2 - log I/O operations and filenames
-            3 - log database/profile/timewindow changes
-        :param debug:
-            0 - don't print
-            1 - print exceptions
-            2 - unsupported and unhandled types (cases that may cause errors)
-            3 - red warnings that needs examination - developer warnings
-        :param text: text to print. Can include format like 'Test {}'.format('here')
-        """
-
-        levels = f'{verbose}{debug}'
-        self.outputqueue.put(f'{levels}|{self.name}|{text}')
 
     def fix_json_packet(self, json_packet):
         """
@@ -195,7 +165,7 @@ class Module(Module, multiprocessing.Process):
             )
 
             portproto = f'{dport}/{proto}'
-            port_info = __database__.get_port_info(portproto)
+            port_info = self.db.get_port_info(portproto)
 
             # generate a random uid
             uid = base64.b64encode(binascii.b2a_hex(os.urandom(9))).decode(
@@ -207,32 +177,28 @@ class Module(Module, multiprocessing.Process):
             # wait a while before alerting.
             time.sleep(4)
             # make sure we have a profile for any of the above IPs
-            if __database__.has_profile(src_profileid):
+            if self.db.has_profile(src_profileid):
                 attacker_direction = 'dstip'
+                victim = srcip
                 profileid = src_profileid
                 attacker = dstip
-                ip_identification = __database__.getIPIdentification(dstip)
-                description = (
-                    f'{rule} to destination address: {dstip} {ip_identification} '
-                    f"port: {portproto} {port_info if port_info else ''}. Leaked location: {strings_matched}"
-                )
+                ip_identification = self.db.get_ip_identification(dstip)
+                description = f"{rule} to destination address: {dstip} {ip_identification} port: {portproto} {port_info or ''}. Leaked location: {strings_matched}"
 
-            elif __database__.has_profile(dst_profileid):
+            elif self.db.has_profile(dst_profileid):
                 attacker_direction = 'srcip'
+                victim = dstip
                 profileid = dst_profileid
                 attacker = srcip
-                ip_identification = __database__.getIPIdentification(srcip)
-                description = (
-                    f'{rule} to destination address: {srcip} {ip_identification} '
-                    f"port: {portproto} {port_info if port_info else ''}. Leaked location: {strings_matched}"
-                )
+                ip_identification = self.db.get_ip_identification(srcip)
+                description = f"{rule} to destination address: {srcip} {ip_identification} port: {portproto} {port_info or ''}. Leaked location: {strings_matched}"
 
             else:
                 # no profiles in slips for either IPs
                 return
 
             # in which tw is this ts?
-            twid = __database__.getTWofTime(profileid, ts)
+            twid = self.db.getTWofTime(profileid, ts)
             # convert ts to a readable format
             ts = utils.convert_format(ts, utils.alerts_format)
             if twid:
@@ -243,9 +209,9 @@ class Module(Module, multiprocessing.Process):
                 category = 'Malware'
                 confidence = 0.9
                 threat_level = 'high'
-                __database__.setEvidence(evidence_type, attacker_direction, attacker, threat_level, confidence,
+                self.db.setEvidence(evidence_type, attacker_direction, attacker, threat_level, confidence,
                                          description, ts, category, source_target_tag=source_target_tag, port=dport,
-                                         proto=proto, profileid=profileid, twid=twid, uid=uid)
+                                         proto=proto, profileid=profileid, twid=twid, uid=uid, victim=victim)
 
     def compile_and_save_rules(self):
         """
@@ -325,7 +291,7 @@ class Module(Module, multiprocessing.Process):
                 var = line[1].replace('$', '')
                 # strings_matched is exactly the string that was found that triggered this detection
                 # starts from the var until the end of the line
-                strings_matched = ' '.join([s for s in line[2:]])
+                strings_matched = ' '.join(list(line[2:]))
                 self.set_evidence_yara_match({
                     'rule': matching_rule,
                     'vars_matched': var,
@@ -333,21 +299,19 @@ class Module(Module, multiprocessing.Process):
                     'offset': offset,
                 })
 
-    def run(self):
+    def pre_main(self):
         utils.drop_root_privs()
-        try:
-            if not self.bin_found:
-                return True
 
-            # if we we don't have compiled rules, compile them
-            if self.compile_and_save_rules():
-                # run the yara rules on the given pcap
-                self.find_matches()
-        except KeyboardInterrupt:
-            self.shutdown_gracefully()
-            return True
-        except Exception as inst:
-            exception_line = sys.exc_info()[2].tb_lineno
-            self.print(f'Problem on the run() line {exception_line}', 0, 1)
-            self.print(traceback.format_exc(), 0, 1)
-            return True
+        if not self.bin_found:
+            # yara is not installed
+            return 1
+
+        # if we we don't have compiled rules, compile them
+        if self.compile_and_save_rules():
+            # run the yara rules on the given pcap
+            self.find_matches()
+
+    def main(self):
+        # nothing runs in a loop in this module
+        # exit module
+        return 1

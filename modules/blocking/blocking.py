@@ -1,19 +1,13 @@
-from slips_files.common.abstracts import Module
-import multiprocessing
-from slips_files.core.database.database import __database__
-from slips_files.common.config_parser import ConfigParser
-from slips_files.common.slips_utils import utils
+from slips_files.common.imports import *
 import platform
-import traceback
 import sys
 import os
 import shutil
 import json
 import subprocess
 import time
-import traceback
 
-class Module(Module, multiprocessing.Process):
+class Blocking(Module, multiprocessing.Process):
     """Data should be passed to this module as a json encoded python dict,
     by default this module flushes all slipsBlocking chains before it starts"""
 
@@ -21,14 +15,11 @@ class Module(Module, multiprocessing.Process):
     name = 'Blocking'
     description = 'Block malicious IPs connecting to this device'
     authors = ['Sebastian Garcia, Alya Gomaa']
-
-    def __init__(self, outputqueue, redis_port=6379):
-        multiprocessing.Process.__init__(self)
-        # All the printing output should be sent to the outputqueue.
-        # The outputqueue is connected to another process called OutputProcess
-        self.outputqueue = outputqueue
-        __database__.start(redis_port)
-        self.c1 = __database__.subscribe('new_blocking')
+    def init(self):
+        self.c1 = self.db.subscribe('new_blocking')
+        self.channels = {
+            'new_blocking': self.c1,
+        }
         self.os = platform.system()
         if self.os == 'Darwin':
             self.print('Mac OS blocking is not supported yet.')
@@ -58,7 +49,7 @@ class Module(Module, multiprocessing.Process):
             }
             # Example of passing blocking_data to this module:
             blocking_data = json.dumps(blocking_data)
-            __database__.publish('new_blocking', blocking_data)
+            self.db.publish('new_blocking', blocking_data)
             self.print('[test] Blocked ip.')
         else:
             self.print('[test] IP is already blocked')
@@ -72,30 +63,8 @@ class Module(Module, multiprocessing.Process):
         self.running_in_docker = os.environ.get(
             'IS_IN_A_DOCKER_CONTAINER', False
         )
-        if self.running_in_docker:
-            self.sudo = ''
-        else:
-            self.sudo = 'sudo '
+        self.sudo = '' if self.running_in_docker else 'sudo '
 
-    def print(self, text, verbose=1, debug=0):
-        """
-        Function to use to print text using the outputqueue of slips.
-        Slips then decides how, when and where to print this text by taking all the processes into account
-        :param verbose:
-            0 - don't print
-            1 - basic operation/proof of work
-            2 - log I/O operations and filenames
-            3 - log database/profile/timewindow changes
-        :param debug:
-            0 - don't print
-            1 - print exceptions
-            2 - unsupported and unhandled types (cases that may cause errors)
-            3 - red warnings that needs examination - developer warnings
-        :param text: text to print. Can include format like 'Test {}'.format('here')
-        """
-
-        levels = f'{verbose}{debug}'
-        self.outputqueue.put(f'{levels}|{self.name}|{text}')
 
     def determine_linux_firewall(self):
         """Returns the currently installed firewall and installs iptables if none was found"""
@@ -118,9 +87,7 @@ class Module(Module, multiprocessing.Process):
         # check if slipsBlocking chain exists before flushing it and suppress stderr and stdout while checking
         # 0 means it exists
         chain_exists = (
-            os.system(
-                self.sudo + 'iptables -nvL slipsBlocking >/dev/null 2>&1'
-            )
+            os.system(f'{self.sudo}iptables -nvL slipsBlocking >/dev/null 2>&1')
             == 0
         )
         if self.firewall == 'iptables' and chain_exists:
@@ -135,9 +102,9 @@ class Module(Module, multiprocessing.Process):
         elif self.firewall == 'nftables':
             # TODO: handle the creation of the slipsBlocking chain in nftables
             # Flush rules in slipsBlocking chain because you can't delete a chain without flushing first
-            os.system(self.sudo + 'nft flush chain inet slipsBlocking')
+            os.system(f'{self.sudo}nft flush chain inet slipsBlocking')
             # Delete slipsBlocking chain from nftables
-            os.system(self.sudo + 'nft delete chain inet slipsBlocking')
+            os.system(f'{self.sudo}nft delete chain inet slipsBlocking')
             return True
         return False
 
@@ -158,18 +125,12 @@ class Module(Module, multiprocessing.Process):
             # self.delete_iptables_chain()
             self.print('Executing "sudo iptables -N slipsBlocking"', 6, 0)
             # Add a new chain to iptables
-            os.system(self.sudo + 'iptables -N slipsBlocking >/dev/null 2>&1')
+            os.system(f'{self.sudo}iptables -N slipsBlocking >/dev/null 2>&1')
 
             # Check if we're already redirecting to slipsBlocking chain
-            INPUT_chain_rules = self.get_cmd_output(
-                self.sudo + ' iptables -nvL INPUT'
-            )
-            OUTPUT_chain_rules = self.get_cmd_output(
-                self.sudo + ' iptables -nvL OUTPUT'
-            )
-            FORWARD_chain_rules = self.get_cmd_output(
-                self.sudo + ' iptables -nvL FORWARD'
-            )
+            INPUT_chain_rules = self.get_cmd_output(f'{self.sudo} iptables -nvL INPUT')
+            OUTPUT_chain_rules = self.get_cmd_output(f'{self.sudo} iptables -nvL OUTPUT')
+            FORWARD_chain_rules = self.get_cmd_output(f'{self.sudo} iptables -nvL FORWARD')
             # Redirect the traffic from all other chains to slipsBlocking so rules
             # in any pre-existing chains dont override it
             # -I to insert slipsBlocking at the top of the INPUT, OUTPUT and FORWARD chains
@@ -194,7 +155,7 @@ class Module(Module, multiprocessing.Process):
                 'Executing "sudo nft add table inet slipsBlocking"', 6, 0
             )
             # Add a new nft table that uses the inet family (ipv4,ipv6)
-            os.system(self.sudo + 'nft add table inet slipsBlocking')
+            os.system(f'{self.sudo}nft add table inet slipsBlocking')
             # TODO: HANDLE NFT TABLE
 
     def exec_iptables_command(self, action, ip_to_block, flag, options):
@@ -223,7 +184,7 @@ class Module(Module, multiprocessing.Process):
     def is_ip_blocked(self, ip) -> bool:
         """Checks if ip is already blocked or not"""
 
-        command = self.sudo + 'iptables -L slipsBlocking -v -n'
+        command = f'{self.sudo}iptables -L slipsBlocking -v -n'
         # Execute command
         result = subprocess.run(command.split(), stdout=subprocess.PIPE)
         result = result.stdout.decode('utf-8')
@@ -261,9 +222,9 @@ class Module(Module, multiprocessing.Process):
                 from_, to = True, True
             # This dictionary will be used to construct the rule
             options = {
-                'protocol': ' -p ' + protocol if protocol != None else '',
-                'dport': ' --dport ' + str(dport) if dport != None else '',
-                'sport': ' --sport ' + str(sport) if sport != None else '',
+                'protocol': f' -p {protocol}' if protocol is not None else '',
+                'dport': f' --dport {str(dport)}' if dport is not None else '',
+                'sport': f' --sport {str(sport)}' if sport is not None else '',
             }
 
             if from_:
@@ -356,97 +317,79 @@ class Module(Module, multiprocessing.Process):
 
         if unblocked:
             # Successfully blocked an ip
-            self.print('Unblocked: ' + ip_to_unblock)
+            self.print(f'Unblocked: {ip_to_unblock}')
             return True
         return False
 
-    def shutdown_gracefully(self):
-        __database__.publish('finished_modules', self.name)
+    def check_for_ips_to_unblock(self):
+            unblocked_ips = set()
+            # check if any ip needs to be unblocked
+            for ip, info in self.unblock_ips.items():
+                # info is a dict with:
+                # 'block_for': block_for,
+                #   'time_of_blocking': time_of_blocking,
+                #   'blocking_details': {
+                #       "from"     : from_ ,
+                #       "to"       : to,
+                #       "dport"    : dport,
+                #       "sport"    : sport,
+                #       "protocol" : protocol}}}
+                if (
+                    time.time()
+                    >= info['time_of_blocking'] + info['block_for']
+                ):
+                    blocking_details = info['blocking_details']
+                    self.unblock_ip(
+                        ip,
+                        blocking_details['from'],
+                        blocking_details['to'],
+                        blocking_details['dport'],
+                        blocking_details['sport'],
+                        blocking_details['protocol'],
+                    )
+                    # make a list of unblocked IPs to remove from dict
+                    unblocked_ips.add(ip)
 
-    def run(self):
-        # Main loop function
-        while True:
-            try:
-                message = __database__.get_message(self.c1)
-                # Check that the message is for you. Probably unnecessary...
-                if message and message['data'] == 'stop_process':
-                    self.shutdown_gracefully()
-                    return True
-                # There's an IP that needs to be blocked
-                if utils.is_msg_intended_for(message, 'new_blocking'):
-                    # message['data'] in the new_blocking channel is a dictionary that contains
-                    # the ip and the blocking options
-                    # Example of the data dictionary to block or unblock an ip:
-                    # (notice you have to specify from,to,dport,sport,protocol or at least 2 of them when unblocking)
-                    #   blocking_data = {
-                    #       "ip"       : "0.0.0.0"
-                    #       "block"    : True to block  - False to unblock
-                    #       "from"     : True to block traffic from ip (default) - False does nothing
-                    #       "to"       : True to block traffic to ip  (default)  - False does nothing
-                    #       "dport"    : Optional destination port number
-                    #       "sport"    : Optional source port number
-                    #       "protocol" : Optional protocol
-                    #       'block_for': Optional, after this time (in seconds) this ip will be unblocked
-                    #   }
-                    # Example of passing blocking_data to this module:
-                    #   blocking_data = json.dumps(blocking_data)
-                    #   __database__.publish('new_blocking', blocking_data )
+            for ip in unblocked_ips:
+                self.unblock_ips.pop(ip)
 
-                    # Decode(deserialize) the python dict into JSON formatted string
-                    data = json.loads(message['data'])
-                    # Parse the data dictionary
-                    ip = data.get('ip')
-                    block = data.get('block')
-                    from_ = data.get('from')
-                    to = data.get('to')
-                    dport = data.get('dport')
-                    sport = data.get('sport')
-                    protocol = data.get('protocol')
-                    block_for = data.get('block_for')
-                    if block:
-                        self.block_ip(
-                            ip, from_, to, dport, sport, protocol, block_for
-                        )
-                    else:
-                        self.unblock_ip(ip, from_, to, dport, sport, protocol)
+    def main(self):
+        # There's an IP that needs to be blocked
+        if msg := self.get_msg('new_blocking'):
+            # message['data'] in the new_blocking channel is a dictionary that contains
+            # the ip and the blocking options
+            # Example of the data dictionary to block or unblock an ip:
+            # (notice you have to specify from,to,dport,sport,protocol or at least 2 of them when unblocking)
+            #   blocking_data = {
+            #       "ip"       : "0.0.0.0"
+            #       "block"    : True to block  - False to unblock
+            #       "from"     : True to block traffic from ip (default) - False does nothing
+            #       "to"       : True to block traffic to ip  (default)  - False does nothing
+            #       "dport"    : Optional destination port number
+            #       "sport"    : Optional source port number
+            #       "protocol" : Optional protocol
+            #       'block_for': Optional, after this time (in seconds) this ip will be unblocked
+            #   }
+            # Example of passing blocking_data to this module:
+            #   blocking_data = json.dumps(blocking_data)
+            #   self.db.publish('new_blocking', blocking_data )
 
-                unblocked_ips = set()
-                # check if any ip needs to be unblocked
-                for ip, info in self.unblock_ips.items():
-                    # info is a dict with:
-                    # 'block_for': block_for,
-                    #   'time_of_blocking': time_of_blocking,
-                    #   'blocking_details': {
-                    #       "from"     : from_ ,
-                    #       "to"       : to,
-                    #       "dport"    : dport,
-                    #       "sport"    : sport,
-                    #       "protocol" : protocol}}}
-                    if (
-                        time.time()
-                        >= info['time_of_blocking'] + info['block_for']
-                    ):
-                        blocking_details = info['blocking_details']
-                        self.unblock_ip(
-                            ip,
-                            blocking_details['from'],
-                            blocking_details['to'],
-                            blocking_details['dport'],
-                            blocking_details['sport'],
-                            blocking_details['protocol'],
-                        )
-                        # make a list of unblocked IPs to remove from dict
-                        unblocked_ips.add(ip)
+            # Decode(deserialize) the python dict into JSON formatted string
+            data = json.loads(msg['data'])
+            # Parse the data dictionary
+            ip = data.get('ip')
+            block = data.get('block')
+            from_ = data.get('from')
+            to = data.get('to')
+            dport = data.get('dport')
+            sport = data.get('sport')
+            protocol = data.get('protocol')
+            block_for = data.get('block_for')
+            if block:
+                self.block_ip(
+                    ip, from_, to, dport, sport, protocol, block_for
+                )
+            else:
+                self.unblock_ip(ip, from_, to, dport, sport, protocol)
+        self.check_for_ips_to_unblock()
 
-                for ip in unblocked_ips:
-                    self.unblock_ips.pop(ip)
-
-            except KeyboardInterrupt:
-                self.shutdown_gracefully()
-                return True
-            except Exception as inst:
-                exception_line = sys.exc_info()[2].tb_lineno
-                self.print(f'Problem on the run() line {exception_line}', 0, 1)
-                self.print(traceback.format_exc(), 0, 1)
-
-                return True

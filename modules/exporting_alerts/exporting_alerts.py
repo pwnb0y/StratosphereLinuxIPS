@@ -1,8 +1,4 @@
-from slips_files.common.abstracts import Module
-from slips_files.core.database.database import __database__
-from slips_files.common.slips_utils import utils
-from slips_files.common.config_parser import ConfigParser
-import multiprocessing
+from slips_files.common.imports import *
 from slack import WebClient
 from slack.errors import SlackApiError
 import os
@@ -12,10 +8,9 @@ from cabby import create_client
 import time
 import threading
 import sys
-import traceback
 import datetime
 
-class Module(Module, multiprocessing.Process):
+class ExportingAlerts(Module, multiprocessing.Process):
     """
     Module to export alerts to slack and/or STIX
     You need to have the token in your environment variables to use this module
@@ -25,12 +20,12 @@ class Module(Module, multiprocessing.Process):
     description = 'Export alerts to slack or STIX format'
     authors = ['Alya Gomaa']
 
-    def __init__(self, outputqueue, redis_port):
-        multiprocessing.Process.__init__(self)
+    def init(self):
         self.port = None
-        self.outputqueue = outputqueue
-        __database__.start(redis_port)
-        self.c1 = __database__.subscribe('export_evidence')
+        self.c1 = self.db.subscribe('export_evidence')
+        self.channels = {
+            'export_evidence': self.c1
+        }
         self.read_configuration()
         if 'slack' in self.export_to:
             self.get_slack_token()
@@ -38,7 +33,7 @@ class Module(Module, multiprocessing.Process):
         self.is_bundle_created = False
         # To avoid duplicates in STIX_data.json
         self.added_ips = set()
-        self.is_running_on_interface = '-i' in sys.argv or __database__.is_growing_zeek_dir()
+        self.is_running_on_interface = '-i' in sys.argv or self.db.is_growing_zeek_dir()
         self.export_to_taxii_thread = threading.Thread(
             target=self.send_to_server, daemon=True
         )
@@ -88,25 +83,7 @@ class Module(Module, multiprocessing.Process):
             # Stop the module
             self.shutdown_gracefully()
 
-    def print(self, text, verbose=1, debug=0):
-        """
-        Function to use to print text using the outputqueue of slips.
-        Slips then decides how, when and where to print this text by taking all the processes into account
-        :param verbose:
-            0 - don't print
-            1 - basic operation/proof of work
-            2 - log I/O operations and filenames
-            3 - log database/profile/timewindow changes
-        :param debug:
-            0 - don't print
-            1 - print exceptions
-            2 - unsupported and unhandled types (cases that may cause errors)
-            3 - red warnings that needs examination - developer warnings
-        :param text: text to print. Can include format like 'Test {}'.format('here')
-        """
 
-        levels = f'{verbose}{debug}'
-        self.outputqueue.put(f'{levels}|{self.name}|{text}')
 
     def ip_exists_in_stix_file(self, ip):
         """Searches for ip in STIX_data.json to avoid exporting duplicates"""
@@ -115,7 +92,7 @@ class Module(Module, multiprocessing.Process):
     def send_to_slack(self, msg_to_send: str) -> bool:
         # Msgs sent in this channel will be exported to slack
         # Token to login to your slack bot. it should be set in slack_bot_token_secret
-        if self.BOT_TOKEN is '':
+        if self.BOT_TOKEN == '':
             # The file is empty
             self.print(
                 f"Can't find SLACK_BOT_TOKEN in {self.slack_token_filepath}.",0,2,
@@ -124,7 +101,7 @@ class Module(Module, multiprocessing.Process):
 
         slack_client = WebClient(token=self.BOT_TOKEN)
         try:
-            response = slack_client.chat_postMessage(
+            slack_client.chat_postMessage(
                 # Channel name is set in slips.conf
                 channel=self.slack_channel_name,
                 # Sensor name is set in slips.conf
@@ -152,7 +129,7 @@ class Module(Module, multiprocessing.Process):
             discovery_path=self.discovery_path,
         )
         # jwt_auth_url is optional
-        if self.jwt_auth_path is not '':
+        if self.jwt_auth_path != '':
             client.set_auth(
                 username=self.taxii_username,
                 password=self.taxii_password,
@@ -235,16 +212,14 @@ class Module(Module, multiprocessing.Process):
             # Get the ip
             attacker = attacker.split(':')[0]
         ioc_type = utils.detect_data_type(attacker)
-        if ioc_type is 'ip':
-            pattern = "[ip-addr:value = '{}']".format(attacker)
-        elif ioc_type is 'domain':
-            pattern = "[domain-name:value = '{}']".format(attacker)
-        elif ioc_type is 'url':
-            pattern = "[url:value = '{}']".format(attacker)
+        if ioc_type == 'ip':
+            pattern = f"[ip-addr:value = '{attacker}']"
+        elif ioc_type == 'domain':
+            pattern = f"[domain-name:value = '{attacker}']"
+        elif ioc_type == 'url':
+            pattern = f"[url:value = '{attacker}']"
         else:
-            self.print(
-                "Can't set pattern for STIX. {}".format(attacker), 0, 3
-            )
+            self.print(f"Can't set pattern for STIX. {attacker}", 0, 3)
             return False
         # Required Indicator Properties: type, spec_version, id, created, modified , all are set automatically
         # Valid_from, created and modified attribute will be set to the current time
@@ -275,7 +250,7 @@ class Module(Module, multiprocessing.Process):
             # Append mode to add the new indicator to the objects array
             with open('STIX_data.json', 'a') as stix_file:
                 # Append the indicator in the objects array
-                stix_file.write(',' + str(indicator) + ']\n}\n')
+                stix_file.write(f',{str(indicator)}' + ']\n}\n')
 
         # Set of unique ips added to stix_data.json to avoid duplicates
         self.added_ips.add(attacker)
@@ -316,11 +291,7 @@ class Module(Module, multiprocessing.Process):
             date_time = utils.convert_format(date_time, utils.alerts_format)
             self.send_to_slack(f'{date_time}: Slips finished on sensor: {self.sensor_name}.')
 
-        # Confirm that the module is done processing
-        __database__.publish('finished_modules', self.name)
-        return
-
-    def run(self):
+    def pre_main(self):
         utils.drop_root_privs()
         if (
             self.is_running_on_interface
@@ -336,39 +307,22 @@ class Module(Module, multiprocessing.Process):
             date_time = utils.convert_format(date_time, utils.alerts_format)
             self.send_to_slack(f'{date_time}: Slips started on sensor: {self.sensor_name}.')
 
-        while True:
-            try:
-                msg = __database__.get_message(self.c1)
+    def main(self):
+        if msg:= self.get_msg('export_evidence'):
+            evidence = json.loads(msg['data'])
+            description = evidence['description']
+            if 'slack' in self.export_to and hasattr(self, 'BOT_TOKEN'):
+                srcip = evidence['profileid'].split("_")[-1]
+                msg_to_send = f'Src IP {srcip} Detected {description}'
+                self.send_to_slack(msg_to_send)
 
-                if msg and msg['data'] == 'stop_process':
-                    self.shutdown_gracefully()
-                    return True
-
-                if utils.is_msg_intended_for(msg, 'export_evidence'):
-                    evidence = json.loads(msg['data'])
-                    description = evidence['description']
-                    if 'slack' in self.export_to and hasattr(self, 'BOT_TOKEN'):
-                        srcip = evidence['profileid'].split("_")[-1]
-                        msg_to_send = f'Src IP {srcip} Detected {description}'
-                        self.send_to_slack(msg_to_send)
-
-                    if 'stix' in self.export_to:
-                        msg_to_send = (
-                            evidence['evidence_type'],
-                            evidence['attacker_direction'],
-                            evidence['attacker'],
-                            description,
-                        )
-                        exported_to_stix = self.export_to_STIX(msg_to_send)
-                        if not exported_to_stix:
-                            self.print('Problem in export_to_STIX()', 0, 3)
-                            continue
-
-            except KeyboardInterrupt:
-                self.shutdown_gracefully()
-                return True
-            except Exception as inst:
-                exception_line = sys.exc_info()[2].tb_lineno
-                self.print(f'Problem on the run() line {exception_line}', 0, 1)
-                self.print(traceback.format_exc(), 0, 1)
-                return True
+            if 'stix' in self.export_to:
+                msg_to_send = (
+                    evidence['evidence_type'],
+                    evidence['attacker_direction'],
+                    evidence['attacker'],
+                    description,
+                )
+                exported_to_stix = self.export_to_STIX(msg_to_send)
+                if not exported_to_stix:
+                    self.print('Problem in export_to_STIX()', 0, 3)
